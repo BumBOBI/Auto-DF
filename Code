@@ -1,0 +1,590 @@
+
+// ==UserScript==
+
+// @name         Delta Force Garena Auto Redeem
+
+// @namespace    https://staybrowser.com/
+
+// @version      6.0
+
+// @description  Tự động nhập code Delta Force Garena với tốc độ gấp 3 lần và cập nhật bộ đếm tức thì
+
+// @author       lhyuz
+
+// @match        *://redeem.df.garena.sg/*
+
+ 
+
+(function() {
+
+'use strict';
+
+ 
+
+const css = `
+
+#df-redeem-btn {
+
+position: fixed;
+
+bottom: 25px;
+
+right: 15px;
+
+z-index: 999999;
+
+background: #ff5722;
+
+color: #fff;
+
+padding: 12px 16px;
+
+border-radius: 50px;
+
+font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+
+font-size: 14px;
+
+font-weight: bold;
+
+box-shadow: 0 4px 15px rgba(0,0,0,0.4);
+
+border: none;
+
+}
+
+#df-redeem-panel {
+
+position: fixed;
+
+bottom: 80px;
+
+right: 15px;
+
+width: 320px;
+
+max-width: 90vw;
+
+background: #1e1e24;
+
+border: 1px solid #333;
+
+border-radius: 12px;
+
+box-shadow: 0 8px 30px rgba(0,0,0,0.6);
+
+padding: 14px;
+
+z-index: 999999;
+
+display: none;
+
+font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+
+color: #fff;
+
+}
+
+#df-counter-box {
+
+display: grid;
+
+grid-template-columns: repeat(3, 1fr);
+
+gap: 6px;
+
+margin-bottom: 8px;
+
+text-align: center;
+
+}
+
+.counter-badge {
+
+background: #2b2b36;
+
+padding: 6px 4px;
+
+border-radius: 6px;
+
+border: 1px solid #3d3d4e;
+
+}
+
+.counter-val {
+
+font-size: 16px;
+
+font-weight: bold;
+
+}
+
+.counter-title {
+
+font-size: 10px;
+
+color: #aaa;
+
+text-transform: uppercase;
+
+}
+
+#df-redeem-panel textarea {
+
+width: 100%;
+
+height: 80px;
+
+box-sizing: border-box;
+
+background: #2b2b36;
+
+color: #fff;
+
+border: 1px solid #444;
+
+border-radius: 6px;
+
+padding: 8px;
+
+font-size: 12px;
+
+resize: none;
+
+margin: 4px 0 6px 0;
+
+}
+
+#df-redeem-panel button.action-btn {
+
+width: 100%;
+
+background: #ff5722;
+
+color: #fff;
+
+border: none;
+
+padding: 10px;
+
+border-radius: 6px;
+
+font-weight: bold;
+
+cursor: pointer;
+
+}
+
+#df-redeem-logs {
+
+font-size: 12px;
+
+margin-top: 8px;
+
+max-height: 110px;
+
+overflow-y: auto;
+
+border: 1px solid #333;
+
+border-radius: 6px;
+
+padding: 6px;
+
+background: #141419;
+
+}
+
+.log-item { margin-bottom: 3px; line-height: 1.3; }
+
+.log-success { color: #2ecc71; font-weight: bold; }
+
+.log-error { color: #e74c3c; font-weight: bold; }
+
+.log-info { color: #3498db; }
+
+`;
+
+ 
+
+if (typeof GM_addStyle !== "undefined") {
+
+GM_addStyle(css);
+
+} else {
+
+const style = document.createElement('style');
+
+style.textContent = css;
+
+document.head.appendChild(style);
+
+}
+
+ 
+
+const triggerBtn = document.createElement('button');
+
+triggerBtn.id = 'df-redeem-btn';
+
+triggerBtn.innerText = '⚡ Nhập Code DF';
+
+ 
+
+const panel = document.createElement('div');
+
+panel.id = 'df-redeem-panel';
+
+panel.innerHTML = `
+
+<div style="font-weight: bold; font-size: 14px; margin-bottom: 8px; color: #ff5722;">Delta Force Code Tool (3x Speed)</div>
+
+<div id="df-counter-box">
+
+<div class="counter-badge">
+
+<div class="counter-val" id="cnt-progress" style="color: #3498db;">0/0</div>
+
+<div class="counter-title">Tiến trình</div>
+
+</div>
+
+<div class="counter-badge">
+
+<div class="counter-val" id="cnt-success" style="color: #2ecc71;">0</div>
+
+<div class="counter-title">Thành công</div>
+
+</div>
+
+<div class="counter-badge">
+
+<div class="counter-val" id="cnt-failed" style="color: #e74c3c;">0</div>
+
+<div class="counter-title">Thất bại</div>
+
+</div>
+
+</div>
+
+<textarea id="df-code-input" placeholder="Dán danh sách mã code vào đây..."></textarea>
+
+<button class="action-btn" id="df-start-btn">Bắt đầu Redeem</button>
+
+<div id="df-redeem-logs">
+
+<div class="log-item log-info">Tốc độ siêu tốc đã sẵn sàng!</div>
+
+</div>
+
+`;
+
+ 
+
+document.body.appendChild(triggerBtn);
+
+document.body.appendChild(panel);
+
+ 
+
+triggerBtn.addEventListener('click', () => {
+
+panel.style.display = (panel.style.display === 'none' || panel.style.display === '') ? 'block' : 'none';
+
+});
+
+ 
+
+const addLog = (text, type = 'info') => {
+
+const logBox = document.getElementById('df-redeem-logs');
+
+if (!logBox) return;
+
+const div = document.createElement('div');
+
+div.className = `log-item log-${type}`;
+
+div.innerText = text;
+
+logBox.appendChild(div);
+
+logBox.scrollTop = logBox.scrollHeight;
+
+};
+
+ 
+
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+ 
+
+const setInputValue = (input, val) => {
+
+input.focus();
+
+const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
+
+nativeSetter.call(input, val);
+
+input.dispatchEvent(new Event('input', { bubbles: true }));
+
+input.dispatchEvent(new Event('change', { bubbles: true }));
+
+input.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true }));
+
+};
+
+ 
+
+function getCDKInput() {
+
+const inputs = Array.from(document.querySelectorAll('input[type="text"], input:not([type])'))
+
+.filter(el => !panel.contains(el) && el.offsetParent !== null);
+
+ 
+
+let cdkInput = inputs.find(el => {
+
+const attr = (el.placeholder + ' ' + el.id + ' ' + el.name + ' ' + el.className).toLowerCase();
+
+return attr.includes('cdk') || attr.includes('code') || attr.includes('mã') || attr.includes('quà');
+
+});
+
+ 
+
+return cdkInput || (inputs.length > 0 ? inputs[inputs.length - 1] : null);
+
+}
+
+ 
+
+function getSubmitButton() {
+
+const buttons = Array.from(document.querySelectorAll('button, div[role="button"], a, [class*="btn"]'))
+
+.filter(b => !panel.contains(b) && b.offsetParent !== null);
+
+ 
+
+return buttons.find(b => {
+
+const txt = (b.innerText || b.textContent || '').trim().toLowerCase();
+
+return txt === 'đổi' || txt === 'xác nhận' || txt === 'nhận' || txt === 'redeem' || txt === 'exchange' || txt === 'confirm';
+
+});
+
+}
+
+ 
+
+const inspectResponse = async () => {
+
+const startTime = Date.now();
+
+// Quét nhanh liên tục trong tối đa 1.5 giây
+
+while (Date.now() - startTime < 1500) {
+
+const popups = Array.from(document.querySelectorAll('.van-dialog, .van-toast, .modal, .dialog, .popup, div[role="dialog"], [class*="notice"], [class*="alert"]'))
+
+.filter(el => !panel.contains(el) && el.getBoundingClientRect().width > 0 && window.getComputedStyle(el).display !== 'none');
+
+ 
+
+for (const pop of popups) {
+
+const text = (pop.innerText || pop.textContent || "").trim();
+
+if (text.length > 2) {
+
+let isSuccess = /thành công|chúc mừng|success|congratulations/i.test(text);
+
+ 
+
+const closeBtn = Array.from(pop.querySelectorAll('button, div[role="button"], span'))
+
+.find(b => /ok|xác nhận|confirm|đóng|close/i.test((b.innerText || '').toLowerCase()));
+
+if (closeBtn) closeBtn.click();
+
+ 
+
+const cleanMsg = text.split('\n').filter(t => t.trim().length > 0)[0];
+
+return isSuccess ? { status: 'success', msg: cleanMsg } : { status: 'error', msg: cleanMsg };
+
+}
+
+}
+
+await sleep(100);
+
+}
+
+return { status: 'error', msg: 'Hết thời gian chờ / Lỗi mạng' };
+
+};
+
+ 
+
+function updateCounterView(success, failed, current, total) {
+
+const elProgress = document.getElementById('cnt-progress');
+
+const elSuccess = document.getElementById('cnt-success');
+
+const elFailed = document.getElementById('cnt-failed');
+
+ 
+
+elProgress.textContent = `${current}/${total}`;
+
+elSuccess.textContent = String(success);
+
+elFailed.textContent = String(failed);
+
+ 
+
+void elSuccess.offsetHeight;
+
+void elFailed.offsetHeight;
+
+}
+
+ 
+
+async function runBatch() {
+
+const textarea = document.getElementById('df-code-input');
+
+const list = textarea.value.split('\n').map(c => c.trim()).filter(c => c.length >= 4);
+
+ 
+
+if (list.length === 0) {
+
+addLog('⚠️ Vui lòng dán code vào ô!', 'error');
+
+return;
+
+}
+
+ 
+
+const inputField = getCDKInput();
+
+if (!inputField) {
+
+addLog('❌ Không tìm thấy ô nhập! Hãy chọn Server/Nhân vật trước.', 'error');
+
+return;
+
+}
+
+ 
+
+const startBtn = document.getElementById('df-start-btn');
+
+let successCount = 0;
+
+let failCount = 0;
+
+ 
+
+updateCounterView(0, 0, 0, list.length);
+
+ 
+
+startBtn.disabled = true;
+
+startBtn.innerText = 'Đang chạy siêu tốc...';
+
+ 
+
+for (let i = 0; i < list.length; i++) {
+
+const code = list[i];
+
+addLog(`[${i + 1}/${list.length}] Đang gửi: ${code}...`, 'info');
+
+ 
+
+const currentInput = getCDKInput();
+
+if (currentInput) {
+
+setInputValue(currentInput, code);
+
+}
+
+ 
+
+// Giảm độ trễ điền mã xuống 200ms
+
+await sleep(200);
+
+ 
+
+const submitBtn = getSubmitButton();
+
+if (submitBtn) {
+
+submitBtn.click();
+
+const res = await inspectResponse();
+
+addLog(`➜ ${code}: ${res.msg}`, res.status);
+
+ 
+
+if (res.status === 'success') {
+
+successCount++;
+
+} else {
+
+failCount++;
+
+}
+
+} else {
+
+addLog(`➜ ${code}: Không tìm thấy nút Đổi!`, 'error');
+
+failCount++;
+
+}
+
+ 
+
+updateCounterView(successCount, failCount, i + 1, list.length);
+
+ 
+
+// Giảm thời gian chờ giữa 2 lần nhập xuống 600ms
+
+await sleep(600);
+
+}
+
+ 
+
+addLog(`🏁 Xong toàn bộ! Thành công: ${successCount} | Thất bại: ${failCount}`, 'success');
+
+startBtn.disabled = false;
+
+startBtn.innerText = 'Bắt đầu Redeem';
+
+}
+
+ 
+
+document.getElementById('df-start-btn').addEventListener('click', runBatch);
+
+})();
+
+ 
