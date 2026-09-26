@@ -1,9 +1,9 @@
 // ==UserScript==
-// @name         Delta Force Garena Auto Redeem (iOS - Speed Selector)
+// @name         Delta Force Garena Auto Redeem (iOS - With Stop Button)
 // @namespace    https://staybrowser.com/
-// @version      1.0
-// @description  Tự động nhập code Delta Force Garena trên iOS với tùy chọn tốc độ x0.75 - x4
-// @author       LHyuz
+// @version      12.0
+// @description  Tự động nhập code Delta Force Garena với thanh chọn tốc độ và nút Dừng tiến trình
+// @author       Vibe Coding
 // @match        *://redeem.df.garena.sg/*
 // @grant        GM_addStyle
 // @run-at       document-idle
@@ -11,6 +11,8 @@
 
 (function() {
     'use strict';
+
+    let isRunning = false;
 
     const css = `
         #df-redeem-btn {
@@ -100,8 +102,12 @@
             resize: none;
             margin: 4px 0 6px 0;
         }
-        #df-redeem-panel button.action-btn {
-            width: 100%;
+        .btn-group {
+            display: flex;
+            gap: 8px;
+        }
+        .action-btn {
+            flex: 2;
             background: #ff5722;
             color: #fff;
             border: none;
@@ -109,6 +115,17 @@
             border-radius: 6px;
             font-weight: bold;
             cursor: pointer;
+        }
+        .stop-btn {
+            flex: 1;
+            background: #e74c3c;
+            color: #fff;
+            border: none;
+            padding: 10px;
+            border-radius: 6px;
+            font-weight: bold;
+            cursor: pointer;
+            display: none;
         }
         #df-redeem-logs {
             font-size: 12px;
@@ -124,6 +141,7 @@
         .log-success { color: #2ecc71; font-weight: bold; }
         .log-error { color: #e74c3c; font-weight: bold; }
         .log-info { color: #3498db; }
+        .log-warn { color: #f1c40f; font-weight: bold; }
     `;
 
     if (typeof GM_addStyle !== "undefined") {
@@ -168,7 +186,10 @@
             </select>
         </div>
         <textarea id="df-code-input" placeholder="Dán danh sách mã code vào đây..."></textarea>
-        <button class="action-btn" id="df-start-btn">Bắt đầu Redeem</button>
+        <div class="btn-group">
+            <button class="action-btn" id="df-start-btn">Bắt đầu Redeem</button>
+            <button class="stop-btn" id="df-stop-btn">Dừng lại</button>
+        </div>
         <div id="df-redeem-logs">
             <div class="log-item log-info">Hệ thống đã sẵn sàng!</div>
         </div>
@@ -224,7 +245,6 @@
         });
     }
 
-    // Thời gian quét và timeout phản hồi dựa theo hệ số tốc độ
     const inspectResponse = async (speedMultiplier) => {
         const timeout = Math.max(800, Math.round(4500 / speedMultiplier));
         const checkInterval = Math.max(50, Math.round(300 / speedMultiplier));
@@ -265,6 +285,14 @@
         void elFailed.offsetHeight;
     }
 
+    // Sự kiện nút Dừng
+    document.getElementById('df-stop-btn').addEventListener('click', () => {
+        if (isRunning) {
+            isRunning = false;
+            addLog('⏸️ Đã yêu cầu dừng! Đang ngắt sau mã hiện tại...', 'log-warn');
+        }
+    });
+
     async function runBatch() {
         const textarea = document.getElementById('df-code-input');
         const list = textarea.value.split('\n').map(c => c.trim()).filter(c => c.length >= 4);
@@ -283,22 +311,29 @@
         const speedSelect = document.getElementById('df-speed-select');
         const speed = parseFloat(speedSelect.value) || 1;
 
-        // Các mốc cơ bản (mặc định gốc an toàn)
-        // inputDelay gốc: 600ms, pauseDelay gốc: 1800ms
         const inputDelay = Math.max(80, Math.round(650 / speed));
         const pauseDelay = Math.max(250, Math.round(1900 / speed));
 
         const startBtn = document.getElementById('df-start-btn');
+        const stopBtn = document.getElementById('df-stop-btn');
         let successCount = 0;
         let failCount = 0;
 
         updateCounterView(0, 0, 0, list.length);
 
+        isRunning = true;
         startBtn.disabled = true;
         speedSelect.disabled = true;
+        stopBtn.style.display = 'block';
         startBtn.innerText = `Đang chạy (x${speed})...`;
 
         for (let i = 0; i < list.length; i++) {
+            // Kiểm tra trạng thái nếu bấm Dừng
+            if (!isRunning) {
+                addLog(`⏹️ Đã dừng tiến trình tại mã thứ ${i}/${list.length}`, 'log-warn');
+                break;
+            }
+
             const code = list[i];
             addLog(`[${i + 1}/${list.length}] Đang gửi: ${code}...`, 'info');
 
@@ -330,9 +365,14 @@
             await sleep(pauseDelay);
         }
 
-        addLog(`🏁 Xong! Thành công: ${successCount} | Thất bại: ${failCount}`, 'success');
+        if (isRunning) {
+            addLog(`🏁 Xong! Thành công: ${successCount} | Thất bại: ${failCount}`, 'success');
+        }
+
+        isRunning = false;
         startBtn.disabled = false;
         speedSelect.disabled = false;
+        stopBtn.style.display = 'none';
         startBtn.innerText = 'Bắt đầu Redeem';
     }
 
