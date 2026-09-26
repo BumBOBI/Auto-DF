@@ -1,9 +1,9 @@
 // ==UserScript==
-// @name         Delta Force Garena Auto Redeem (iOS - With Stop Button)
+// @name         Delta Force Garena Auto Redeem (Engine Rebuild v3.1)
 // @namespace    https://staybrowser.com/
-// @version      12.0
-// @description  Tự động nhập code Delta Force Garena với thanh chọn tốc độ và nút Dừng tiến trình
-// @author       Vibe Coding
+// @version      1.1
+// @description  Hệ thống tự động redeem code Delta Force kiến trúc v3.1: State Engine, Queue deduplication, MutationObserver, Bộ lọc kết quả chi tiết
+// @author       Vibe Coding x Lhyuz
 // @match        *://redeem.df.garena.sg/*
 // @grant        GM_addStyle
 // @run-at       document-idle
@@ -12,369 +12,603 @@
 (function() {
     'use strict';
 
-    let isRunning = false;
+    /* ==========================================================================
+       1. STATE ENGINE & EVENT BUS
+       ========================================================================== */
+    const State = {
+        status: 'IDLE', // IDLE, RUNNING, PAUSED, STOPPED
+        queue: [],
+        currentIndex: 0,
+        stats: {
+            total: 0,
+            success: 0,
+            used: 0,
+            invalid: 0,
+            failed: 0
+        },
+        speedMultiplier: 1.0,
+        failedCodes: []
+    };
 
-    const css = `
-        #df-redeem-btn {
+    const EventBus = {
+        listeners: {},
+        on(event, callback) {
+            if (!this.listeners[event]) this.listeners[event] = [];
+            this.listeners[event].push(callback);
+        },
+        emit(event, data) {
+            if (this.listeners[event]) {
+                this.listeners[event].forEach(cb => cb(data));
+            }
+        }
+    };
+
+    /* ==========================================================================
+       2. UI STYLES (Modern Cyberpunk / Dark Dashboard)
+       ========================================================================== */
+    const styles = `
+        :root {
+            --df-primary: #ff5722;
+            --df-primary-hover: #f4511e;
+            --df-bg: #111319;
+            --df-card: #181b24;
+            --df-border: #262a38;
+            --df-text: #e6e8ee;
+            --df-muted: #8b92a5;
+            --df-success: #00e676;
+            --df-warn: #ffab00;
+            --df-danger: #ff5252;
+            --df-info: #40c4ff;
+        }
+
+        #df-floating-trigger {
             position: fixed;
             bottom: 25px;
-            right: 15px;
+            right: 20px;
             z-index: 999999;
-            background: #ff5722;
+            background: linear-gradient(135deg, var(--df-primary), #d84315);
             color: #fff;
-            padding: 12px 16px;
+            padding: 12px 18px;
             border-radius: 50px;
-            font-family: -apple-system, BlinkMacSystemFont, sans-serif;
-            font-size: 14px;
-            font-weight: bold;
-            box-shadow: 0 4px 15px rgba(0,0,0,0.4);
-            border: none;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            font-size: 13px;
+            font-weight: 800;
+            letter-spacing: 0.5px;
+            box-shadow: 0 6px 20px rgba(255, 87, 34, 0.45);
+            border: 1px solid rgba(255,255,255,0.2);
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            user-select: none;
+            transition: transform 0.2s, box-shadow 0.2s;
         }
-        #df-redeem-panel {
+        #df-floating-trigger:active {
+            transform: scale(0.95);
+        }
+
+        #df-dashboard-v3 {
             position: fixed;
-            bottom: 80px;
+            bottom: 85px;
             right: 15px;
-            width: 320px;
-            max-width: 90vw;
-            background: #1e1e24;
-            border: 1px solid #333;
-            border-radius: 12px;
-            box-shadow: 0 8px 30px rgba(0,0,0,0.6);
-            padding: 14px;
+            width: 350px;
+            max-width: 92vw;
+            background: var(--df-bg);
+            border: 1px solid var(--df-border);
+            border-radius: 14px;
+            box-shadow: 0 16px 45px rgba(0, 0, 0, 0.8);
             z-index: 999999;
             display: none;
-            font-family: -apple-system, BlinkMacSystemFont, sans-serif;
-            color: #fff;
+            flex-direction: column;
+            overflow: hidden;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            color: var(--df-text);
         }
-        #df-counter-box {
-            display: grid;
-            grid-template-columns: repeat(3, 1fr);
-            gap: 6px;
-            margin-bottom: 8px;
-            text-align: center;
-        }
-        .counter-badge {
-            background: #2b2b36;
-            padding: 6px 4px;
-            border-radius: 6px;
-            border: 1px solid #3d3d4e;
-        }
-        .counter-val {
-            font-size: 16px;
-            font-weight: bold;
-        }
-        .counter-title {
-            font-size: 10px;
-            color: #aaa;
-            text-transform: uppercase;
-        }
-        .speed-control {
+
+        .df-header {
+            background: var(--df-card);
+            padding: 12px 16px;
+            border-bottom: 1px solid var(--df-border);
             display: flex;
             align-items: center;
             justify-content: space-between;
-            margin-bottom: 6px;
+        }
+        .df-title {
+            font-weight: 800;
             font-size: 13px;
-            background: #2b2b36;
+            color: #fff;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .df-badge-ver {
+            background: rgba(255,87,34,0.15);
+            color: var(--df-primary);
+            font-size: 10px;
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-weight: bold;
+        }
+
+        .df-body {
+            padding: 14px;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+
+        .df-stats-grid {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 6px;
+        }
+        .df-stat-card {
+            background: var(--df-card);
+            border: 1px solid var(--df-border);
+            border-radius: 8px;
+            padding: 8px 4px;
+            text-align: center;
+        }
+        .df-stat-val {
+            font-size: 15px;
+            font-weight: 800;
+            line-height: 1.2;
+        }
+        .df-stat-lbl {
+            font-size: 9px;
+            text-transform: uppercase;
+            color: var(--df-muted);
+            margin-top: 2px;
+        }
+
+        .df-progress-wrap {
+            height: 6px;
+            background: #1e2230;
+            border-radius: 3px;
+            overflow: hidden;
+            position: relative;
+        }
+        .df-progress-bar {
+            height: 100%;
+            width: 0%;
+            background: linear-gradient(90deg, var(--df-primary), var(--df-success));
+            transition: width 0.25s ease;
+        }
+
+        .df-setting-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            font-size: 12px;
+            color: var(--df-muted);
+            background: var(--df-card);
             padding: 6px 10px;
             border-radius: 6px;
-            border: 1px solid #3d3d4e;
+            border: 1px solid var(--df-border);
         }
-        .speed-control select {
-            background: #1e1e24;
-            color: #ff9800;
-            border: 1px solid #555;
+        .df-select {
+            background: #0f1118;
+            color: var(--df-warn);
+            border: 1px solid #363b50;
             border-radius: 4px;
             padding: 4px 8px;
+            font-size: 12px;
             font-weight: bold;
-            font-size: 13px;
             outline: none;
         }
-        #df-redeem-panel textarea {
+
+        #df-code-input {
             width: 100%;
             height: 75px;
-            box-sizing: border-box;
-            background: #2b2b36;
-            color: #fff;
-            border: 1px solid #444;
-            border-radius: 6px;
+            background: #0d0e14;
+            border: 1px solid var(--df-border);
+            border-radius: 8px;
             padding: 8px;
             font-size: 12px;
+            color: #fff;
+            box-sizing: border-box;
             resize: none;
-            margin: 4px 0 6px 0;
+            font-family: monospace;
         }
-        .btn-group {
+        #df-code-input:focus {
+            border-color: var(--df-primary);
+            outline: none;
+        }
+
+        .df-actions {
             display: flex;
-            gap: 8px;
+            gap: 6px;
         }
-        .action-btn {
+        .df-btn {
+            border: none;
+            border-radius: 6px;
+            padding: 10px;
+            font-size: 12px;
+            font-weight: 700;
+            cursor: pointer;
+            transition: opacity 0.2s;
+        }
+        .df-btn:active { opacity: 0.8; }
+        .df-btn-primary {
             flex: 2;
-            background: #ff5722;
-            color: #fff;
-            border: none;
-            padding: 10px;
-            border-radius: 6px;
-            font-weight: bold;
-            cursor: pointer;
+            background: var(--df-primary);
+            color: white;
         }
-        .stop-btn {
+        .df-btn-warn {
             flex: 1;
-            background: #e74c3c;
-            color: #fff;
-            border: none;
-            padding: 10px;
-            border-radius: 6px;
-            font-weight: bold;
-            cursor: pointer;
+            background: #373b4d;
+            color: var(--df-warn);
             display: none;
         }
-        #df-redeem-logs {
-            font-size: 12px;
-            margin-top: 8px;
-            max-height: 100px;
-            overflow-y: auto;
-            border: 1px solid #333;
-            border-radius: 6px;
-            padding: 6px;
-            background: #141419;
+        .df-btn-danger {
+            flex: 1;
+            background: #3e1b21;
+            color: var(--df-danger);
+            border: 1px solid rgba(255,82,82,0.3);
+            display: none;
         }
-        .log-item { margin-bottom: 3px; line-height: 1.3; }
-        .log-success { color: #2ecc71; font-weight: bold; }
-        .log-error { color: #e74c3c; font-weight: bold; }
-        .log-info { color: #3498db; }
-        .log-warn { color: #f1c40f; font-weight: bold; }
+
+        #df-logs-panel {
+            background: #0b0c10;
+            border: 1px solid var(--df-border);
+            border-radius: 8px;
+            height: 100px;
+            overflow-y: auto;
+            padding: 8px;
+            font-size: 11px;
+            font-family: monospace;
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+        .df-log-entry {
+            display: flex;
+            gap: 6px;
+            line-height: 1.3;
+        }
+        .df-log-time { color: #525970; }
+        .df-log-txt { word-break: break-all; }
+        .df-log-success { color: var(--df-success); }
+        .df-log-warn { color: var(--df-warn); }
+        .df-log-danger { color: var(--df-danger); }
+        .df-log-info { color: var(--df-info); }
     `;
 
     if (typeof GM_addStyle !== "undefined") {
-        GM_addStyle(css);
+        GM_addStyle(styles);
     } else {
-        const style = document.createElement('style');
-        style.textContent = css;
-        document.head.appendChild(style);
+        const tag = document.createElement('style');
+        tag.textContent = styles;
+        document.head.appendChild(tag);
     }
 
-    const triggerBtn = document.createElement('button');
-    triggerBtn.id = 'df-redeem-btn';
-    triggerBtn.innerText = '⚙️ Nhập Code DF';
+    /* ==========================================================================
+       3. DOM MOUNTING & UI SETUP
+       ========================================================================== */
+    const trigger = document.createElement('div');
+    trigger.id = 'df-floating-trigger';
+    trigger.innerHTML = `<span>⚡</span><span>DF TOOL 1.1</span>`;
 
-    const panel = document.createElement('div');
-    panel.id = 'df-redeem-panel';
-    panel.innerHTML = `
-        <div style="font-weight: bold; font-size: 14px; margin-bottom: 8px; color: #ff5722;">Delta Force Code Tool</div>
-        <div id="df-counter-box">
-            <div class="counter-badge">
-                <div class="counter-val" id="cnt-progress" style="color: #3498db;">0/0</div>
-                <div class="counter-title">Tiến trình</div>
+    const dashboard = document.createElement('div');
+    dashboard.id = 'df-dashboard-v3';
+    dashboard.innerHTML = `
+        <div class="df-header">
+            <div class="df-title">
+                <span>🎮 Delta Force Redeem</span>
+                <span class="df-badge-ver">v3.1 Rebuild</span>
             </div>
-            <div class="counter-badge">
-                <div class="counter-val" id="cnt-success" style="color: #2ecc71;">0</div>
-                <div class="counter-title">Thành công</div>
+            <span style="cursor:pointer; font-size:16px; color:#888;" id="df-btn-close">✕</span>
+        </div>
+        <div class="df-body">
+            <div class="df-stats-grid">
+                <div class="df-stat-card">
+                    <div class="df-stat-val" id="stat-total" style="color: var(--df-info)">0</div>
+                    <div class="df-stat-lbl">Tổng mã</div>
+                </div>
+                <div class="df-stat-card">
+                    <div class="df-stat-val" id="stat-success" style="color: var(--df-success)">0</div>
+                    <div class="df-stat-lbl">Thành công</div>
+                </div>
+                <div class="df-stat-card">
+                    <div class="df-stat-val" id="stat-used" style="color: var(--df-warn)">0</div>
+                    <div class="df-stat-lbl">Đã nhận</div>
+                </div>
+                <div class="df-stat-card">
+                    <div class="df-stat-val" id="stat-invalid" style="color: var(--df-danger)">0</div>
+                    <div class="df-stat-lbl">Lỗi/Hỏng</div>
+                </div>
             </div>
-            <div class="counter-badge">
-                <div class="counter-val" id="cnt-failed" style="color: #e74c3c;">0</div>
-                <div class="counter-title">Thất bại</div>
+
+            <div class="df-progress-wrap">
+                <div class="df-progress-bar" id="df-progress-bar"></div>
             </div>
-        </div>
-        <div class="speed-control">
-            <span>Tốc độ thực thi:</span>
-            <select id="df-speed-select">
-                <option value="0.75">x0.75 (Chậm / An toàn)</option>
-                <option value="1" selected>x1 (Mặc định)</option>
-                <option value="1.5">x1.5 (Nhanh vừa)</option>
-                <option value="2">x2 (Nhanh gấp đôi)</option>
-                <option value="3">x3 (Siêu tốc)</option>
-                <option value="4">x4 (Cực hạn)</option>
-            </select>
-        </div>
-        <textarea id="df-code-input" placeholder="Dán danh sách mã code vào đây..."></textarea>
-        <div class="btn-group">
-            <button class="action-btn" id="df-start-btn">Bắt đầu Redeem</button>
-            <button class="stop-btn" id="df-stop-btn">Dừng lại</button>
-        </div>
-        <div id="df-redeem-logs">
-            <div class="log-item log-info">Hệ thống đã sẵn sàng!</div>
+
+            <div class="df-setting-row">
+                <span>Tốc độ thực thi:</span>
+                <select id="df-speed-opt" class="df-select">
+                    <option value="0.75">x0.75 (An toàn)</option>
+                    <option value="1.0" selected>x1.0 (Chuẩn)</option>
+                    <option value="2.0">x2.0 (Nhanh)</option>
+                    <option value="3.0">x3.0 (Siêu tốc)</option>
+                    <option value="4.0">x4.0 (Cực hạn)</option>
+                </select>
+            </div>
+
+            <textarea id="df-code-input" placeholder="Dán danh sách mã code... (Tự động lọc trùng)"></textarea>
+
+            <div class="df-actions">
+                <button class="df-btn df-btn-primary" id="btn-start">Bắt đầu chạy</button>
+                <button class="df-btn df-btn-warn" id="btn-pause">Tạm dừng</button>
+                <button class="df-btn df-btn-danger" id="btn-stop">Dừng hẳn</button>
+            </div>
+
+            <div id="df-logs-panel"></div>
         </div>
     `;
 
-    document.body.appendChild(triggerBtn);
-    document.body.appendChild(panel);
+    document.body.appendChild(trigger);
+    document.body.appendChild(dashboard);
 
-    triggerBtn.addEventListener('click', () => {
-        panel.style.display = (panel.style.display === 'none' || panel.style.display === '') ? 'block' : 'none';
-    });
-
-    const addLog = (text, type = 'info') => {
-        const logBox = document.getElementById('df-redeem-logs');
-        if (!logBox) return;
-        const div = document.createElement('div');
-        div.className = `log-item log-${type}`;
-        div.innerText = text;
-        logBox.appendChild(div);
-        logBox.scrollTop = logBox.scrollHeight;
-    };
-
-    const sleep = (ms) => new Promise(r => setTimeout(r, ms));
-
-    const setInputValue = (input, val) => {
-        input.focus();
-        const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
-        nativeSetter.call(input, val);
-        input.dispatchEvent(new Event('input', { bubbles: true }));
-        input.dispatchEvent(new Event('change', { bubbles: true }));
-        input.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true }));
-    };
-
-    function getCDKInput() {
-        const inputs = Array.from(document.querySelectorAll('input[type="text"], input:not([type])'))
-            .filter(el => !panel.contains(el) && el.offsetParent !== null);
-
-        let cdkInput = inputs.find(el => {
-            const attr = (el.placeholder + ' ' + el.id + ' ' + el.name + ' ' + el.className).toLowerCase();
-            return attr.includes('cdk') || attr.includes('code') || attr.includes('mã') || attr.includes('quà');
-        });
-
-        return cdkInput || (inputs.length > 0 ? inputs[inputs.length - 1] : null);
+    /* ==========================================================================
+       4. UI HELPERS & LOGGING
+       ========================================================================== */
+    const logsContainer = document.getElementById('df-logs-panel');
+    function log(message, type = 'info') {
+        const entry = document.createElement('div');
+        entry.className = 'df-log-entry';
+        const now = new Date();
+        const timeStr = `${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}`;
+        entry.innerHTML = `<span class="df-log-time">[${timeStr}]</span><span class="df-log-txt df-log-${type}">${message}</span>`;
+        logsContainer.appendChild(entry);
+        logsContainer.scrollTop = logsContainer.scrollHeight;
     }
 
-    function getSubmitButton() {
+    function updateStatsUI() {
+        document.getElementById('stat-total').innerText = State.stats.total;
+        document.getElementById('stat-success').innerText = State.stats.success;
+        document.getElementById('stat-used').innerText = State.stats.used;
+        document.getElementById('stat-invalid').innerText = State.stats.invalid;
+
+        const progressPercent = State.stats.total > 0
+            ? Math.round((State.currentIndex / State.stats.total) * 100)
+            : 0;
+        document.getElementById('df-progress-bar').style.width = `${progressPercent}%`;
+    }
+
+    trigger.addEventListener('click', () => {
+        dashboard.style.display = (dashboard.style.display === 'flex' ? 'none' : 'flex');
+    });
+    document.getElementById('df-btn-close').addEventListener('click', () => {
+        dashboard.style.display = 'none';
+    });
+
+    /* ==========================================================================
+       5. CORE REDEEM ENGINE (Rebuild v3.1 Engine)
+       ========================================================================== */
+    const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+    // Kích hoạt mô phỏng gõ chữ chuẩn DOM InputEvent
+    function injectInputValue(inputEl, value) {
+        inputEl.focus();
+        const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
+        nativeSetter.call(inputEl, value);
+        inputEl.dispatchEvent(new Event('input', { bubbles: true }));
+        inputEl.dispatchEvent(new Event('change', { bubbles: true }));
+        inputEl.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true }));
+    }
+
+    function locateInputTarget() {
+        const list = Array.from(document.querySelectorAll('input[type="text"], input:not([type])'))
+            .filter(el => !dashboard.contains(el) && el.offsetParent !== null);
+
+        let target = list.find(el => {
+            const str = (el.placeholder + ' ' + el.id + ' ' + el.name + ' ' + el.className).toLowerCase();
+            return str.includes('cdk') || str.includes('code') || str.includes('mã');
+        });
+        return target || (list.length > 0 ? list[list.length - 1] : null);
+    }
+
+    function locateSubmitTarget() {
         const buttons = Array.from(document.querySelectorAll('button, div[role="button"], a, [class*="btn"]'))
-            .filter(b => !panel.contains(b) && b.offsetParent !== null);
+            .filter(b => !dashboard.contains(b) && b.offsetParent !== null);
 
         return buttons.find(b => {
             const txt = (b.innerText || b.textContent || '').trim().toLowerCase();
-            return txt === 'đổi' || txt === 'xác nhận' || txt === 'nhận' || txt === 'redeem' || txt === 'exchange' || txt === 'confirm';
+            return ['đổi', 'xác nhận', 'nhận', 'redeem', 'exchange', 'confirm'].includes(txt);
         });
     }
 
-    const inspectResponse = async (speedMultiplier) => {
-        const timeout = Math.max(800, Math.round(4500 / speedMultiplier));
-        const checkInterval = Math.max(50, Math.round(300 / speedMultiplier));
-        const startTime = Date.now();
-
-        while (Date.now() - startTime < timeout) {
-            const popups = Array.from(document.querySelectorAll('.van-dialog, .van-toast, .modal, .dialog, .popup, div[role="dialog"], [class*="notice"], [class*="alert"]'))
-                .filter(el => !panel.contains(el) && el.getBoundingClientRect().width > 0 && window.getComputedStyle(el).display !== 'none');
-
-            for (const pop of popups) {
-                const text = (pop.innerText || pop.textContent || "").trim();
-                if (text.length > 2) {
-                    let isSuccess = /thành công|chúc mừng|success|congratulations/i.test(text);
-
-                    const closeBtn = Array.from(pop.querySelectorAll('button, div[role="button"], span'))
-                        .find(b => /ok|xác nhận|confirm|đóng|close/i.test((b.innerText || '').toLowerCase()));
-                    if (closeBtn) closeBtn.click();
-
-                    const cleanMsg = text.split('\n').filter(t => t.trim().length > 0)[0];
-                    return isSuccess ? { status: 'success', msg: cleanMsg } : { status: 'error', msg: cleanMsg };
-                }
-            }
-            await sleep(checkInterval);
+    // Cơ chế phân loại kết quả thông minh v3.1
+    function classifyMessage(text) {
+        const lower = text.toLowerCase();
+        if (/thành công|chúc mừng|congratulations|success/i.test(lower)) {
+            return { type: 'success', text };
         }
-        return { status: 'error', msg: 'Hết thời gian chờ / Bỏ qua' };
-    };
-
-    function updateCounterView(success, failed, current, total) {
-        const elProgress = document.getElementById('cnt-progress');
-        const elSuccess = document.getElementById('cnt-success');
-        const elFailed = document.getElementById('cnt-failed');
-
-        elProgress.textContent = `${current}/${total}`;
-        elSuccess.textContent = String(success);
-        elFailed.textContent = String(failed);
-
-        void elSuccess.offsetHeight;
-        void elFailed.offsetHeight;
+        if (/đã sử dụng|đã nhận|đã đổi|already/i.test(lower)) {
+            return { type: 'used', text };
+        }
+        if (/hết hạn|không tồn tại|không hợp lệ|invalid|expired|sai mã/i.test(lower)) {
+            return { type: 'invalid', text };
+        }
+        return { type: 'failed', text };
     }
 
-    // Sự kiện nút Dừng
-    document.getElementById('df-stop-btn').addEventListener('click', () => {
-        if (isRunning) {
-            isRunning = false;
-            addLog('⏸️ Đã yêu cầu dừng! Đang ngắt sau mã hiện tại...', 'log-warn');
-        }
-    });
+    // Bộ lắng nghe phản hồi kết hợp MutationObserver
+    function awaitModalResponse(speed) {
+        return new Promise((resolve) => {
+            const timeoutMs = Math.max(900, Math.round(4500 / speed));
+            let resolved = false;
 
-    async function runBatch() {
-        const textarea = document.getElementById('df-code-input');
-        const list = textarea.value.split('\n').map(c => c.trim()).filter(c => c.length >= 4);
+            const timer = setTimeout(() => {
+                if (!resolved) {
+                    resolved = true;
+                    cleanup();
+                    resolve({ type: 'failed', text: 'Quá thời gian phản hồi' });
+                }
+            }, timeoutMs);
 
-        if (list.length === 0) {
-            addLog('⚠️ Vui lòng dán code vào ô!', 'error');
-            return;
-        }
+            function checkExisting() {
+                const popups = Array.from(document.querySelectorAll('.van-dialog, .van-toast, .modal, .dialog, .popup, div[role="dialog"], [class*="notice"], [class*="alert"]'))
+                    .filter(el => !dashboard.contains(el) && el.getBoundingClientRect().width > 0 && window.getComputedStyle(el).display !== 'none');
 
-        const inputField = getCDKInput();
-        if (!inputField) {
-            addLog('❌ Không tìm thấy ô nhập! Hãy chọn Server/Nhân vật trước.', 'error');
-            return;
-        }
+                for (const p of popups) {
+                    const txt = (p.innerText || p.textContent || "").trim();
+                    if (txt.length > 2) {
+                        const closeBtn = Array.from(p.querySelectorAll('button, div[role="button"], span'))
+                            .find(b => /ok|xác nhận|confirm|đóng|close/i.test((b.innerText || '').toLowerCase()));
+                        if (closeBtn) closeBtn.click();
 
-        const speedSelect = document.getElementById('df-speed-select');
-        const speed = parseFloat(speedSelect.value) || 1;
-
-        const inputDelay = Math.max(80, Math.round(650 / speed));
-        const pauseDelay = Math.max(250, Math.round(1900 / speed));
-
-        const startBtn = document.getElementById('df-start-btn');
-        const stopBtn = document.getElementById('df-stop-btn');
-        let successCount = 0;
-        let failCount = 0;
-
-        updateCounterView(0, 0, 0, list.length);
-
-        isRunning = true;
-        startBtn.disabled = true;
-        speedSelect.disabled = true;
-        stopBtn.style.display = 'block';
-        startBtn.innerText = `Đang chạy (x${speed})...`;
-
-        for (let i = 0; i < list.length; i++) {
-            // Kiểm tra trạng thái nếu bấm Dừng
-            if (!isRunning) {
-                addLog(`⏹️ Đã dừng tiến trình tại mã thứ ${i}/${list.length}`, 'log-warn');
-                break;
+                        const firstLine = txt.split('\n').filter(t => t.trim().length > 0)[0];
+                        return classifyMessage(firstLine);
+                    }
+                }
+                return null;
             }
 
-            const code = list[i];
-            addLog(`[${i + 1}/${list.length}] Đang gửi: ${code}...`, 'info');
+            const observer = new MutationObserver(() => {
+                const res = checkExisting();
+                if (res && !resolved) {
+                    resolved = true;
+                    cleanup();
+                    resolve(res);
+                }
+            });
 
-            const currentInput = getCDKInput();
+            observer.observe(document.body, { childList: true, subtree: true });
+
+            function cleanup() {
+                clearTimeout(timer);
+                observer.disconnect();
+            }
+
+            // Kiểm tra ngay trường hợp popup đã có sẵn
+            const immediate = checkExisting();
+            if (immediate && !resolved) {
+                resolved = true;
+                cleanup();
+                resolve(immediate);
+            }
+        });
+    }
+
+    /* ==========================================================================
+       6. QUEUE SCHEDULER & CONTROLLER
+       ========================================================================== */
+    async function startEngine() {
+        const rawText = document.getElementById('df-code-input').value;
+        const speed = parseFloat(document.getElementById('df-speed-opt').value) || 1.0;
+        State.speedMultiplier = speed;
+
+        // Lọc trùng và chuẩn hóa danh sách
+        const lines = rawText.split('\n')
+            .map(c => c.trim())
+            .filter(c => c.length >= 4);
+
+        const uniqueCodes = [...new Set(lines)];
+
+        if (uniqueCodes.length === 0) {
+            log('⚠️ Danh sách mã trống hoặc không hợp lệ!', 'warn');
+            return;
+        }
+
+        const inputEl = locateInputTarget();
+        if (!inputEl) {
+            log('❌ Không tìm thấy ô nhập code! Hãy đăng nhập trước.', 'danger');
+            return;
+        }
+
+        State.queue = uniqueCodes;
+        State.currentIndex = 0;
+        State.stats = { total: uniqueCodes.length, success: 0, used: 0, invalid: 0, failed: 0 };
+        State.status = 'RUNNING';
+        updateStatsUI();
+
+        // Cập nhật trạng thái nút bấm
+        document.getElementById('btn-start').style.display = 'none';
+        document.getElementById('btn-pause').style.display = 'block';
+        document.getElementById('btn-stop').style.display = 'block';
+        log(`🚀 Khởi chạy engine v3.1: ${uniqueCodes.length} mã (Tốc độ x${speed})`, 'info');
+
+        const inputDelay = Math.max(70, Math.round(550 / speed));
+        const postDelay = Math.max(200, Math.round(1600 / speed));
+
+        while (State.currentIndex < State.queue.length) {
+            if (State.status === 'STOPPED') break;
+
+            if (State.status === 'PAUSED') {
+                await sleep(400);
+                continue;
+            }
+
+            const currentCode = State.queue[State.currentIndex];
+            log(`[${State.currentIndex + 1}/${State.queue.length}] Gửi: ${currentCode}...`, 'info');
+
+            const currentInput = locateInputTarget();
             if (currentInput) {
-                setInputValue(currentInput, code);
+                injectInputValue(currentInput, currentCode);
             }
 
             await sleep(inputDelay);
 
-            const submitBtn = getSubmitButton();
+            const submitBtn = locateSubmitTarget();
             if (submitBtn) {
                 submitBtn.click();
-                const res = await inspectResponse(speed);
-                addLog(`➜ ${code}: ${res.msg}`, res.status);
+                const res = await awaitModalResponse(speed);
 
-                if (res.status === 'success') {
-                    successCount++;
+                if (res.type === 'success') {
+                    State.stats.success++;
+                    log(`✔ [${currentCode}]: ${res.text}`, 'success');
+                } else if (res.type === 'used') {
+                    State.stats.used++;
+                    log(`⚡ [${currentCode}]: ${res.text}`, 'warn');
+                } else if (res.type === 'invalid') {
+                    State.stats.invalid++;
+                    log(`✖ [${currentCode}]: ${res.text}`, 'danger');
                 } else {
-                    failCount++;
+                    State.stats.failed++;
+                    log(`⚠ [${currentCode}]: ${res.text}`, 'danger');
                 }
             } else {
-                addLog(`➜ ${code}: Không tìm thấy nút Đổi!`, 'error');
-                failCount++;
+                State.stats.failed++;
+                log(`✖ [${currentCode}]: Nút xác nhận bị khóa`, 'danger');
             }
 
-            updateCounterView(successCount, failCount, i + 1, list.length);
+            State.currentIndex++;
+            updateStatsUI();
 
-            await sleep(pauseDelay);
+            await sleep(postDelay);
         }
 
-        if (isRunning) {
-            addLog(`🏁 Xong! Thành công: ${successCount} | Thất bại: ${failCount}`, 'success');
-        }
-
-        isRunning = false;
-        startBtn.disabled = false;
-        speedSelect.disabled = false;
-        stopBtn.style.display = 'none';
-        startBtn.innerText = 'Bắt đầu Redeem';
+        log(`🏁 Tiến trình kết thúc! Thành công: ${State.stats.success} | Đã dùng: ${State.stats.used} | Hỏng: ${State.stats.invalid}`, 'success');
+        resetControls();
     }
 
-    document.getElementById('df-start-btn').addEventListener('click', runBatch);
+    function resetControls() {
+        State.status = 'IDLE';
+        document.getElementById('btn-start').style.display = 'block';
+        document.getElementById('btn-start').innerText = 'Chạy lại';
+        document.getElementById('btn-pause').style.display = 'none';
+        document.getElementById('btn-stop').style.display = 'none';
+    }
+
+    document.getElementById('btn-start').addEventListener('click', startEngine);
+
+    document.getElementById('btn-pause').addEventListener('click', () => {
+        if (State.status === 'RUNNING') {
+            State.status = 'PAUSED';
+            document.getElementById('btn-pause').innerText = 'Tiếp tục';
+            log('⏸ Đã tạm dừng tiến trình', 'warn');
+        } else if (State.status === 'PAUSED') {
+            State.status = 'RUNNING';
+            document.getElementById('btn-pause').innerText = 'Tạm dừng';
+            log('▶ Tiếp tục tiến trình', 'info');
+        }
+    });
+
+    document.getElementById('btn-stop').addEventListener('click', () => {
+        State.status = 'STOPPED';
+        log('⏹ Đã hủy tiến trình', 'danger');
+        resetControls();
+    });
+
 })();
