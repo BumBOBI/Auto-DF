@@ -1,800 +1,468 @@
 // ==UserScript==
-// @name         Delta Force Garena Auto Redeem
+// @name         Delta Force Garena Auto Redeem v1.3
 // @namespace    https://staybrowser.com/
-// @version      1.4
-// @description  Hệ thống tự động redeem code Delta Force Garena v1.4 - Đã loại bỏ cơ chế khóa phiên bản
+// @version      1.3
+// @description  Tự động nhập code Delta Force Garena v1.3. Tích hợp kiểm tra đăng nhập, chọn tốc độ, phân loại kết quả và loại bỏ code trùng.
 // @author       BumBOBI
 // @match        *://redeem.df.garena.sg/*
 // @grant        GM_addStyle
-// @run-at       document-start
+// @run-at       document-idle
 // ==/UserScript==
 
 (function() {
     'use strict';
 
-    let lastApiResponse = null;
-    let authData = {
-        isLoggedIn: false,
-        roleName: '',
-        roleId: '',
-        openid: ''
-    };
+    let isRunning = false;
+    let isPaused = false;
+    let authData = { isLoggedIn: false };
 
-    // Theo dõi fetch để lấy thông tin đăng nhập và kết quả redeem
-    const globalContext = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
-    const originalFetch = globalContext.fetch;
-
-    if (originalFetch) {
-        globalContext.fetch = async function(...args) {
-            const url = typeof args[0] === 'string' ? args[0] : (args[0]?.url || '');
-            const response = await originalFetch.apply(this, args);
-
-            try {
-                if (url.includes('openid=') || url.includes('token=')) {
-                    authData.isLoggedIn = true;
-                    const urlObj = new URL(url, window.location.href);
-                    const oid = urlObj.searchParams.get('openid');
-                    if (oid) authData.openid = oid;
-                    updateAuthUI();
-                }
-
-                if (url.includes('GetRole') || url.includes('role_info') || url.includes('user/info') || url.includes('RoleList')) {
-                    const cloned = response.clone();
-                    cloned.json().then(data => {
-                        if (data && data.data) {
-                            authData.isLoggedIn = true;
-                            const role = data.data.role_name || data.data.role_id || data.data.nick_name || (Array.isArray(data.data.roles) && data.data.roles[0]?.role_name);
-                            if (role) authData.roleName = String(role);
-                            updateAuthUI();
-                        }
-                    }).catch(() => {});
-                }
-
-                if (url.includes('RedeemCDKey') || url.includes('CdkV2')) {
-                    const cloned = response.clone();
-                    cloned.json().then(data => {
-                        lastApiResponse = data;
-                        window.dispatchEvent(new CustomEvent('df_redeem_event', { detail: data }));
-                    }).catch(() => {});
-                }
-            } catch (e) {}
-
-            return response;
-        };
-    }
-
-    const State = {
-        status: 'IDLE',
-        queue: [],
-        currentIndex: 0,
-        stats: {
-            total: 0,
-            success: 0,
-            used: 0,
-            invalid: 0,
-            failed: 0
-        },
-        speedMultiplier: 2.0,
-        failedCodes: []
-    };
-
-    const styles = `
-        :root {
-            --df-primary: #ff5722;
-            --df-primary-hover: #f4511e;
-            --df-bg: #111319;
-            --df-card: #181b24;
-            --df-border: #262a38;
-            --df-text: #e6e8ee;
-            --df-muted: #8b92a5;
-            --df-success: #00e676;
-            --df-warn: #ffab00;
-            --df-danger: #ff5252;
-            --df-info: #40c4ff;
-        }
-
-        #df-floating-trigger {
+    const css = `
+        #df-redeem-btn {
             position: fixed;
             bottom: 25px;
-            right: 20px;
+            right: 15px;
             z-index: 999999;
-            background: linear-gradient(135deg, var(--df-primary), #d84315);
+            background: linear-gradient(135deg, #ff5722, #d84315);
             color: #fff;
-            padding: 12px 18px;
+            padding: 12px 16px;
             border-radius: 50px;
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-            font-size: 13px;
-            font-weight: 800;
-            letter-spacing: 0.5px;
-            box-shadow: 0 6px 20px rgba(255, 87, 34, 0.45);
+            font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+            font-size: 14px;
+            font-weight: bold;
+            box-shadow: 0 4px 15px rgba(255,87,34,0.4);
             border: 1px solid rgba(255,255,255,0.2);
             cursor: pointer;
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            user-select: none;
-            transition: transform 0.2s, box-shadow 0.2s;
         }
-        #df-floating-trigger:active {
-            transform: scale(0.95);
-        }
-
-        #df-dashboard-v3 {
+        #df-redeem-panel {
             position: fixed;
-            bottom: 85px;
+            bottom: 80px;
             right: 15px;
-            width: 350px;
+            width: 330px;
             max-width: 92vw;
-            background: var(--df-bg);
-            border: 1px solid var(--df-border);
-            border-radius: 14px;
-            box-shadow: 0 16px 45px rgba(0, 0, 0, 0.8);
+            background: #111319;
+            border: 1px solid #262a38;
+            border-radius: 12px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.8);
+            padding: 14px;
             z-index: 999999;
             display: none;
-            flex-direction: column;
-            overflow: hidden;
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-            color: var(--df-text);
+            font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+            color: #e6e8ee;
         }
-
         .df-header {
-            background: var(--df-card);
-            padding: 12px 16px;
-            border-bottom: 1px solid var(--df-border);
             display: flex;
-            align-items: center;
             justify-content: space-between;
-        }
-        .df-title {
-            font-weight: 800;
-            font-size: 13px;
-            color: #fff;
-            display: flex;
             align-items: center;
-            gap: 6px;
+            margin-bottom: 10px;
         }
-        .df-badge-ver {
-            background: rgba(0, 230, 118, 0.15);
-            color: var(--df-success);
-            font-size: 10px;
-            padding: 2px 6px;
-            border-radius: 4px;
-            font-weight: bold;
-        }
-
-        .df-body {
-            position: relative;
-            padding: 14px;
-            display: flex;
-            flex-direction: column;
-            gap: 10px;
-        }
-
+        .df-title { font-weight: 800; font-size: 14px; color: #fff; }
+        .df-badge { background: rgba(0,230,118,0.15); color: #00e676; padding: 2px 6px; border-radius: 4px; font-size: 10px; }
+        
         .df-auth-banner {
-            padding: 7px 10px;
+            padding: 6px 10px;
             border-radius: 6px;
             font-size: 11px;
-            font-weight: 600;
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
+            font-weight: bold;
+            text-align: center;
+            margin-bottom: 8px;
             background: #1c1316;
             border: 1px solid rgba(255, 82, 82, 0.3);
-            color: var(--df-danger);
+            color: #ff5252;
+            transition: all 0.3s;
         }
-        .df-auth-banner.df-logged {
+        .df-auth-banner.logged {
             background: #102619;
             border-color: rgba(0, 230, 118, 0.3);
-            color: var(--df-success);
+            color: #00e676;
         }
 
-        .df-stats-grid {
+        #df-counter-box {
             display: grid;
             grid-template-columns: repeat(4, 1fr);
             gap: 6px;
-        }
-        .df-stat-card {
-            background: var(--df-card);
-            border: 1px solid var(--df-border);
-            border-radius: 8px;
-            padding: 8px 4px;
+            margin-bottom: 8px;
             text-align: center;
         }
-        .df-stat-val {
-            font-size: 15px;
-            font-weight: 800;
-            line-height: 1.2;
+        .counter-badge {
+            background: #181b24;
+            padding: 6px 2px;
+            border-radius: 6px;
+            border: 1px solid #262a38;
         }
-        .df-stat-lbl {
-            font-size: 9px;
-            text-transform: uppercase;
-            color: var(--df-muted);
-            margin-top: 2px;
-        }
-
-        .df-progress-wrap {
-            height: 6px;
-            background: #1e2230;
-            border-radius: 3px;
-            overflow: hidden;
-            position: relative;
-        }
-        .df-progress-bar {
-            height: 100%;
-            width: 0%;
-            background: linear-gradient(90deg, var(--df-primary), var(--df-success));
-            transition: width 0.25s ease;
-        }
-
-        .df-setting-row {
+        .counter-val { font-size: 14px; font-weight: bold; }
+        .counter-title { font-size: 9px; color: #8b92a5; text-transform: uppercase; margin-top:2px; }
+        
+        .speed-control {
             display: flex;
             align-items: center;
             justify-content: space-between;
+            margin-bottom: 8px;
             font-size: 12px;
-            color: var(--df-muted);
-            background: var(--df-card);
+            background: #181b24;
             padding: 6px 10px;
             border-radius: 6px;
-            border: 1px solid var(--df-border);
+            border: 1px solid #262a38;
+            color: #8b92a5;
         }
-        .df-select {
+        .speed-control select {
             background: #0f1118;
-            color: var(--df-warn);
+            color: #ffab00;
             border: 1px solid #363b50;
             border-radius: 4px;
             padding: 4px 8px;
-            font-size: 12px;
             font-weight: bold;
+            font-size: 12px;
             outline: none;
         }
-
         #df-code-input {
             width: 100%;
-            height: 75px;
-            background: #0d0e14;
-            border: 1px solid var(--df-border);
-            border-radius: 8px;
-            padding: 8px;
-            font-size: 12px;
-            color: #fff;
+            height: 70px;
             box-sizing: border-box;
-            resize: none;
-            font-family: monospace;
-        }
-        #df-code-input:focus {
-            border-color: var(--df-primary);
-            outline: none;
-        }
-
-        .df-actions {
-            display: flex;
-            gap: 6px;
-        }
-        .df-btn {
-            border: none;
+            background: #0d0e14;
+            color: #fff;
+            border: 1px solid #262a38;
             border-radius: 6px;
-            padding: 10px;
-            font-size: 12px;
-            font-weight: 700;
-            cursor: pointer;
-            transition: opacity 0.2s;
-        }
-        .df-btn:active { opacity: 0.8; }
-        .df-btn-primary {
-            flex: 2;
-            background: var(--df-primary);
-            color: white;
-        }
-        .df-btn-warn {
-            flex: 1;
-            background: #373b4d;
-            color: var(--df-warn);
-            display: none;
-        }
-        .df-btn-danger {
-            flex: 1;
-            background: #3e1b21;
-            color: var(--df-danger);
-            border: 1px solid rgba(255,82,82,0.3);
-            display: none;
-        }
-
-        #df-logs-panel {
-            background: #0b0c10;
-            border: 1px solid var(--df-border);
-            border-radius: 8px;
-            height: 100px;
-            overflow-y: auto;
             padding: 8px;
-            font-size: 11px;
+            font-size: 12px;
+            resize: none;
+            margin-bottom: 8px;
             font-family: monospace;
-            display: flex;
-            flex-direction: column;
-            gap: 4px;
         }
-        .df-log-entry {
-            display: flex;
-            gap: 6px;
-            line-height: 1.3;
+        .btn-group { display: flex; gap: 6px; }
+        .action-btn, .pause-btn, .stop-btn {
+            border: none; padding: 10px; border-radius: 6px; font-weight: bold; cursor: pointer; font-size: 12px;
         }
-        .df-log-time { color: #525970; }
-        .df-log-txt { word-break: break-all; }
-        .df-log-success { color: var(--df-success); }
-        .df-log-warn { color: var(--df-warn); }
-        .df-log-danger { color: var(--df-danger); }
-        .df-log-info { color: var(--df-info); }
+        .action-btn { flex: 2; background: #ff5722; color: #fff; }
+        .pause-btn { flex: 1; background: #373b4d; color: #ffab00; display: none; }
+        .stop-btn { flex: 1; background: #3e1b21; color: #ff5252; border: 1px solid rgba(255,82,82,0.3); display: none; }
+        
+        #df-redeem-logs {
+            font-size: 11px;
+            margin-top: 8px;
+            height: 90px;
+            overflow-y: auto;
+            border: 1px solid #262a38;
+            border-radius: 6px;
+            padding: 6px;
+            background: #0b0c10;
+            font-family: monospace;
+        }
+        .log-item { margin-bottom: 4px; line-height: 1.3; }
+        .log-time { color: #525970; margin-right: 4px;}
+        .log-success { color: #00e676; }
+        .log-used { color: #ffab00; }
+        .log-error { color: #ff5252; }
+        .log-info { color: #40c4ff; }
     `;
 
-    function initUI() {
-        if (typeof GM_addStyle !== "undefined") {
-            GM_addStyle(styles);
-        } else {
-            const tag = document.createElement('style');
-            tag.textContent = styles;
-            document.head.appendChild(tag);
-        }
-
-        const trigger = document.createElement('div');
-        trigger.id = 'df-floating-trigger';
-        trigger.innerHTML = `<span>⚡</span><span>DF TOOL 1.4</span>`;
-
-        const dashboard = document.createElement('div');
-        dashboard.id = 'df-dashboard-v3';
-        dashboard.innerHTML = `
-            <div class="df-header">
-                <div class="df-title">
-                    <span>🎮 Delta Force Redeem</span>
-                    <span class="df-badge-ver" id="df-ver-tag">v1.4 Offline</span>
-                </div>
-                <div style="display:flex; align-items:center; gap:8px;">
-                    <span style="cursor:pointer; font-size:16px; color:#888;" id="df-btn-close">✕</span>
-                </div>
-            </div>
-            <div class="df-body">
-                <div class="df-auth-banner" id="df-auth-box">
-                    <span id="df-auth-text">🔴 Đang kiểm tra đăng nhập...</span>
-                    <span id="df-auth-sub" style="font-size:10px; opacity:0.8;"></span>
-                </div>
-
-                <div class="df-stats-grid">
-                    <div class="df-stat-card">
-                        <div class="df-stat-val" id="stat-total" style="color: var(--df-info)">0</div>
-                        <div class="df-stat-lbl">Tổng mã</div>
-                    </div>
-                    <div class="df-stat-card">
-                        <div class="df-stat-val" id="stat-success" style="color: var(--df-success)">0</div>
-                        <div class="df-stat-lbl">Thành công</div>
-                    </div>
-                    <div class="df-stat-card">
-                        <div class="df-stat-val" id="stat-used" style="color: var(--df-warn)">0</div>
-                        <div class="df-stat-lbl">Đã nhận</div>
-                    </div>
-                    <div class="df-stat-card">
-                        <div class="df-stat-val" id="stat-failed" style="color: var(--df-danger)">0</div>
-                        <div class="df-stat-lbl">Thất bại</div>
-                    </div>
-                </div>
-
-                <div class="df-progress-wrap">
-                    <div class="df-progress-bar" id="df-progress-bar"></div>
-                </div>
-
-                <div class="df-setting-row">
-                    <span>Tốc độ thực thi:</span>
-                    <select id="df-speed-opt" class="df-select">
-                        <option value="0.75">x0.75 (Chậm)</option>
-                        <option value="1.0">x1.0 (Chuẩn)</option>
-                        <option value="1.5">x1.5 (Vừa)</option>
-                        <option value="2.0" selected>x2.0 (Nhanh)</option>
-                        <option value="3.0">x3.0 (Siêu tốc)</option>
-                        <option value="4.0">x4.0 (Cực hạn)</option>
-                    </select>
-                </div>
-
-                <textarea id="df-code-input" placeholder="Dán danh sách code (dòng hoặc dấu cách)..."></textarea>
-
-                <div class="df-actions">
-                    <button class="df-btn df-btn-primary" id="btn-start">Bắt đầu chạy</button>
-                    <button class="df-btn df-btn-warn" id="btn-pause">Tạm dừng</button>
-                    <button class="df-btn df-btn-danger" id="btn-stop">Dừng hẳn</button>
-                </div>
-
-                <div id="df-logs-panel"></div>
-            </div>
-        `;
-
-        document.body.appendChild(trigger);
-        document.body.appendChild(dashboard);
-
-        trigger.addEventListener('click', () => {
-            dashboard.style.display = (dashboard.style.display === 'flex' ? 'none' : 'flex');
-            checkLoginState();
-        });
-        document.getElementById('df-btn-close').addEventListener('click', () => {
-            dashboard.style.display = 'none';
-        });
-
-        document.getElementById('btn-start').addEventListener('click', startEngine);
-        document.getElementById('btn-pause').addEventListener('click', () => {
-            if (State.status === 'RUNNING') {
-                State.status = 'PAUSED';
-                document.getElementById('btn-pause').innerText = 'Tiếp tục';
-                log('Đã tạm dừng tiến trình', 'warn');
-            } else if (State.status === 'PAUSED') {
-                State.status = 'RUNNING';
-                document.getElementById('btn-pause').innerText = 'Tạm dừng';
-                log('Tiếp tục tiến trình', 'info');
-            }
-        });
-        document.getElementById('btn-stop').addEventListener('click', () => {
-            State.status = 'STOPPED';
-            log('Đã hủy tiến trình', 'danger');
-            resetControls();
-        });
-
-        setInterval(checkLoginState, 2000);
-    }
-
-    if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', initUI);
+    if (typeof GM_addStyle !== "undefined") {
+        GM_addStyle(css);
     } else {
-        initUI();
+        const style = document.createElement('style');
+        style.textContent = css;
+        document.head.appendChild(style);
     }
 
-    function checkLoginState() {
-        const dashboard = document.getElementById('df-dashboard-v3');
-        const elements = Array.from(document.querySelectorAll('a, button, div, span, p'))
-            .filter(el => !(dashboard && dashboard.contains(el)) && el.offsetParent !== null);
+    const triggerBtn = document.createElement('button');
+    triggerBtn.id = 'df-redeem-btn';
+    triggerBtn.innerHTML = '⚡ DF TOOL 1.3';
 
-        const hasLoginText = elements.some(el => {
-            const txt = (el.innerText || el.textContent || '').trim().toLowerCase();
-            return txt === 'đăng nhập' || txt === 'login' || txt === 'sign in';
-        });
+    const panel = document.createElement('div');
+    panel.id = 'df-redeem-panel';
+    panel.innerHTML = `
+        <div class="df-header">
+            <div class="df-title">🎮 Delta Force Redeem</div>
+            <div class="df-badge">v1.3</div>
+        </div>
+        <div id="df-auth-status" class="df-auth-banner">🔴 Đang kiểm tra đăng nhập...</div>
+        <div id="df-counter-box">
+            <div class="counter-badge">
+                <div class="counter-val" id="cnt-total" style="color: #40c4ff;">0</div>
+                <div class="counter-title">Tổng mã</div>
+            </div>
+            <div class="counter-badge">
+                <div class="counter-val" id="cnt-success" style="color: #00e676;">0</div>
+                <div class="counter-title">Thành công</div>
+            </div>
+            <div class="counter-badge">
+                <div class="counter-val" id="cnt-used" style="color: #ffab00;">0</div>
+                <div class="counter-title">Đã nhận</div>
+            </div>
+            <div class="counter-badge">
+                <div class="counter-val" id="cnt-failed" style="color: #ff5252;">0</div>
+                <div class="counter-title">Thất bại</div>
+            </div>
+        </div>
+        <div class="speed-control">
+            <span>Tốc độ chạy:</span>
+            <select id="df-speed-select">
+                <option value="0.75">x0.75 (Chậm)</option>
+                <option value="1" selected>x1.0 (Chuẩn)</option>
+                <option value="1.5">x1.5 (Vừa)</option>
+                <option value="2">x2.0 (Nhanh)</option>
+                <option value="3">x3.0 (Siêu tốc)</option>
+                <option value="4">x4.0 (Cực hạn)</option>
+            </select>
+        </div>
+        <textarea id="df-code-input" placeholder="Dán danh sách mã code vào đây (xuống dòng hoặc dấu cách)..."></textarea>
+        <div class="btn-group">
+            <button class="action-btn" id="df-start-btn">Bắt đầu chạy</button>
+            <button class="pause-btn" id="df-pause-btn">Tạm dừng</button>
+            <button class="stop-btn" id="df-stop-btn">Dừng hẳn</button>
+        </div>
+        <div id="df-redeem-logs">
+            <div class="log-item"><span class="log-info">Sẵn sàng hoạt động!</span></div>
+        </div>
+    `;
 
-        const hasLogoutText = elements.some(el => {
-            const txt = (el.innerText || el.textContent || '').trim().toLowerCase();
-            return txt === 'đăng xuất' || txt === 'logout' || txt === 'thoát';
-        });
+    document.body.appendChild(triggerBtn);
+    document.body.appendChild(panel);
 
-        const roleElements = elements.filter(el => {
-            const txt = (el.innerText || el.textContent || '').trim();
-            return /nhân vật:|server:|uid:|role:|máy chủ:/i.test(txt);
-        });
+    triggerBtn.addEventListener('click', () => {
+        panel.style.display = (panel.style.display === 'none' || panel.style.display === '') ? 'block' : 'none';
+        checkLoginStatus(); 
+    });
 
-        if (roleElements.length > 0) {
-            authData.isLoggedIn = true;
-            if (!authData.roleName) {
-                authData.roleName = roleElements[0].innerText.replace(/\n/g, ' ').trim();
-            }
-        } else if (hasLogoutText) {
-            authData.isLoggedIn = true;
-        } else if (hasLoginText && !authData.openid) {
-            authData.isLoggedIn = false;
-        }
-
-        const input = locateInputTarget();
-        if (input && !hasLoginText) {
-            authData.isLoggedIn = true;
-        }
-
-        updateAuthUI();
-        return authData.isLoggedIn;
-    }
-
-    function updateAuthUI() {
-        const box = document.getElementById('df-auth-box');
-        const txt = document.getElementById('df-auth-text');
-        const sub = document.getElementById('df-auth-sub');
-        if (!box || !txt) return;
-
-        if (authData.isLoggedIn) {
-            box.className = 'df-auth-banner df-logged';
-            txt.innerText = '🟢 Đã đăng nhập game';
-            sub.innerText = authData.roleName ? `(${authData.roleName.substring(0, 18)})` : (authData.openid ? `(ID: ${authData.openid.slice(-6)})` : '');
-        } else {
-            box.className = 'df-auth-banner';
-            txt.innerText = '🔴 Chưa đăng nhập tài khoản';
-            sub.innerText = 'Hãy đăng nhập trước';
-        }
-    }
-
-    function log(message, type = 'info') {
-        const logsContainer = document.getElementById('df-logs-panel');
-        if (!logsContainer) return;
-        const entry = document.createElement('div');
-        entry.className = 'df-log-entry';
+    const addLog = (text, type = 'info') => {
+        const logBox = document.getElementById('df-redeem-logs');
+        if (!logBox) return;
+        const div = document.createElement('div');
+        div.className = `log-item log-${type}`;
         const now = new Date();
         const timeStr = `${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}`;
-        entry.innerHTML = `<span class="df-log-time">[${timeStr}]</span><span class="df-log-txt df-log-${type}">${message}</span>`;
-        logsContainer.appendChild(entry);
-        logsContainer.scrollTop = logsContainer.scrollHeight;
-    }
-
-    function updateStatsUI() {
-        const elTotal = document.getElementById('stat-total');
-        const elSuccess = document.getElementById('stat-success');
-        const elUsed = document.getElementById('stat-used');
-        const elFailed = document.getElementById('stat-failed');
-        const elProgress = document.getElementById('df-progress-bar');
-
-        if (elTotal) elTotal.textContent = String(State.stats.total);
-        if (elSuccess) elSuccess.textContent = String(State.stats.success);
-        if (elUsed) elUsed.textContent = String(State.stats.used);
-        if (elFailed) elFailed.textContent = String(State.stats.invalid + State.stats.failed);
-
-        if (elProgress && State.stats.total > 0) {
-            const progressPercent = Math.min(100, Math.round((State.currentIndex / State.stats.total) * 100));
-            elProgress.style.width = `${progressPercent}%`;
-        }
-
-        // Force DOM redraw cho Safari/iOS
-        if (elSuccess) void elSuccess.offsetHeight;
-        if (elFailed) void elFailed.offsetHeight;
-    }
+        div.innerHTML = `<span class="log-time">[${timeStr}]</span>${text}`;
+        logBox.appendChild(div);
+        logBox.scrollTop = logBox.scrollHeight;
+    };
 
     const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-    function injectInputValue(inputEl, value) {
-        inputEl.focus();
-        inputEl.value = value;
+    const setInputValue = (input, val) => {
+        input.focus();
         const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")?.set;
-        if (nativeSetter) {
-            nativeSetter.call(inputEl, value);
-        }
-        inputEl.dispatchEvent(new Event('input', { bubbles: true }));
-        inputEl.dispatchEvent(new Event('change', { bubbles: true }));
-        inputEl.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true }));
-        inputEl.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true }));
-    }
+        if (nativeSetter) nativeSetter.call(input, val);
+        else input.value = val;
+        
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        input.dispatchEvent(new Event('change', { bubbles: true }));
+        input.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true }));
+    };
 
-    function locateInputTarget() {
-        const dashboard = document.getElementById('df-dashboard-v3');
-        const list = Array.from(document.querySelectorAll('input[type="text"], input:not([type])'))
-            .filter(el => !(dashboard && dashboard.contains(el)) && el.offsetParent !== null);
+    function getCDKInput() {
+        const inputs = Array.from(document.querySelectorAll('input[type="text"], input:not([type])'))
+            .filter(el => !panel.contains(el) && el.offsetParent !== null);
 
-        let target = list.find(el => {
-            const str = (el.placeholder + ' ' + el.id + ' ' + el.name + ' ' + el.className).toLowerCase();
-            return str.includes('cdk') || str.includes('code') || str.includes('mã') || str.includes('nhập');
+        let cdkInput = inputs.find(el => {
+            const attr = (el.placeholder + ' ' + el.id + ' ' + el.name + ' ' + el.className).toLowerCase();
+            return attr.includes('cdk') || attr.includes('code') || attr.includes('mã') || attr.includes('quà');
         });
-        return target || (list.length > 0 ? list[list.length - 1] : null);
+
+        return cdkInput || (inputs.length > 0 ? inputs[inputs.length - 1] : null);
     }
 
-    function locateSubmitTarget() {
-        const dashboard = document.getElementById('df-dashboard-v3');
-        const buttons = Array.from(document.querySelectorAll('button, div[role="button"], a, [class*="btn"], [class*="button"], [class*="submit"]'))
-            .filter(b => !(dashboard && dashboard.contains(b)) && b.offsetParent !== null);
+    function getSubmitButton() {
+        const buttons = Array.from(document.querySelectorAll('button, div[role="button"], a, [class*="btn"]'))
+            .filter(b => !panel.contains(b) && b.offsetParent !== null);
 
         return buttons.find(b => {
             const txt = (b.innerText || b.textContent || '').trim().toLowerCase();
-            return txt.includes('đổi') || txt.includes('xác nhận') || txt.includes('nhận') || txt.includes('redeem') || txt.includes('exchange') || txt.includes('confirm');
+            return ['đổi', 'xác nhận', 'nhận', 'redeem', 'exchange', 'confirm'].some(kw => txt.includes(kw));
         });
     }
 
-    function parseApiResponse(json) {
-        if (!json) return null;
-        const code = json.code;
-        const msg = json.msg || '';
-
-        if (code === 0) {
-            return { type: 'success', text: msg || 'Đổi thành công' };
-        }
-        // Bao gồm mã lỗi 400067, 400065, 400066 là đã nhận
-        if (code === 400067 || code === 400065 || code === 400066 || /limit|reached|đã nhận|đã đổi|already/i.test(msg)) {
-            return { type: 'used', text: msg || 'Đã đạt giới hạn nhóm code (Đã nhận)' };
-        }
-        // Lỗi mất token 400006, 400001, 400003
-        if (code === 400001 || code === 400003 || code === 400006 || /token|login|đăng nhập/i.test(msg)) {
+    function checkLoginStatus() {
+        const authBanner = document.getElementById('df-auth-status');
+        const inputField = getCDKInput();
+        
+        if (inputField) {
+            authData.isLoggedIn = true;
+            authBanner.className = 'df-auth-banner logged';
+            authBanner.innerText = '🟢 Đã đăng nhập & Chọn nhân vật thành công';
+        } else {
             authData.isLoggedIn = false;
-            updateAuthUI();
-            return { type: 'failed', text: 'Phiên đăng nhập hết hạn! Hãy đăng nhập lại' };
+            authBanner.className = 'df-auth-banner';
+            authBanner.innerText = '🔴 Chưa thấy ô nhập code. Hãy đăng nhập!';
         }
-        return { type: 'invalid', text: msg || `Lỗi (${code})` };
+        return authData.isLoggedIn;
     }
+    
+    setInterval(checkLoginStatus, 2000);
 
-    function classifyMessage(text) {
+    function parseMessage(text) {
         const lower = text.toLowerCase();
-        if (/thành công|chúc mừng|congratulations|success/i.test(lower)) {
-            return { type: 'success', text };
+        
+        if (/thành công|chúc mừng|success|congratulations/i.test(lower)) {
+            return { status: 'success', msg: text };
         }
-        if (/đã sử dụng|đã nhận|đã đổi|already|limit|reached|giới hạn/i.test(lower)) {
-            return { type: 'used', text };
+        if (/đã sử dụng|đã nhận|đã đổi|already|limit|reached|giới hạn|400067|400065|400066/i.test(lower)) {
+            return { status: 'used', msg: text };
         }
-        if (/đăng nhập|login|hết hạn phiên/i.test(lower)) {
-            authData.isLoggedIn = false;
-            updateAuthUI();
-            return { type: 'failed', text };
+        if (/đăng nhập|login|hết hạn|token|400006/i.test(lower)) {
+            return { status: 'expired', msg: 'Mất phiên đăng nhập! Hãy tải lại trang.' };
         }
-        return { type: 'invalid', text };
+        return { status: 'error', msg: text };
     }
 
-    function dismissAnyPopup() {
-        const dashboard = document.getElementById('df-dashboard-v3');
-        const popups = Array.from(document.querySelectorAll('.van-dialog, .van-toast, .van-popup, .modal, .dialog, .popup, div[role="dialog"]'))
-            .filter(el => !(dashboard && dashboard.contains(el)) && el.getBoundingClientRect().width > 0);
+    const inspectResponse = async (speedMultiplier) => {
+        const timeout = Math.max(900, Math.round(4500 / speedMultiplier));
+        const checkInterval = Math.max(50, Math.round(250 / speedMultiplier));
+        const startTime = Date.now();
 
-        for (const p of popups) {
-            const closeBtn = Array.from(p.querySelectorAll('button, div[role="button"], span, a'))
-                .find(b => /ok|xác nhận|confirm|đóng|close|biết rồi/i.test((b.innerText || b.textContent || '').toLowerCase()));
-            if (closeBtn) closeBtn.click();
-        }
-    }
+        while (Date.now() - startTime < timeout) {
+            const popups = Array.from(document.querySelectorAll('.van-dialog, .van-toast, .modal, .dialog, .popup, div[role="dialog"], [class*="notice"], [class*="alert"]'))
+                .filter(el => !panel.contains(el) && el.getBoundingClientRect().width > 0 && window.getComputedStyle(el).display !== 'none');
 
-    function awaitRedeemResult(speed) {
-        return new Promise((resolve) => {
-            const timeoutMs = Math.max(900, Math.round(3500 / speed));
-            let resolved = false;
-            lastApiResponse = null;
+            for (const pop of popups) {
+                const text = (pop.innerText || pop.textContent || "").trim();
+                if (text.length > 2) {
+                    const closeBtn = Array.from(pop.querySelectorAll('button, div[role="button"], span'))
+                        .find(b => /ok|xác nhận|confirm|đóng|close|biết rồi/i.test((b.innerText || '').toLowerCase()));
+                    if (closeBtn) closeBtn.click();
 
-            const onApiEvent = (e) => {
-                if (!resolved && e.detail) {
-                    resolved = true;
-                    cleanup();
-                    dismissAnyPopup();
-                    resolve(parseApiResponse(e.detail));
+                    const cleanMsg = text.split('\n').filter(t => t.trim().length > 0)[0];
+                    return parseMessage(cleanMsg);
                 }
-            };
-            window.addEventListener('df_redeem_event', onApiEvent, { once: true });
-
-            const timer = setTimeout(() => {
-                if (!resolved) {
-                    resolved = true;
-                    cleanup();
-                    if (lastApiResponse) {
-                        resolve(parseApiResponse(lastApiResponse));
-                    } else {
-                        resolve({ type: 'failed', text: 'Quá thời gian phản hồi' });
-                    }
-                }
-            }, timeoutMs);
-
-            function checkDOMPopups() {
-                const dashboard = document.getElementById('df-dashboard-v3');
-                const popups = Array.from(document.querySelectorAll('.van-dialog, .van-toast, .van-popup, .modal, .dialog, .popup, div[role="dialog"], [class*="modal"], [class*="dialog"], [class*="popup"], [class*="toast"], [class*="notice"], [class*="alert"]'))
-                    .filter(el => !(dashboard && dashboard.contains(el)) && el.getBoundingClientRect().width > 0 && window.getComputedStyle(el).display !== 'none');
-
-                for (const p of popups) {
-                    const txt = (p.innerText || p.textContent || "").trim();
-                    if (txt.length > 2) {
-                        const closeBtn = Array.from(p.querySelectorAll('button, div[role="button"], span, a'))
-                            .find(b => /ok|xác nhận|confirm|đóng|close|biết rồi/i.test((b.innerText || b.textContent || '').toLowerCase()));
-                        if (closeBtn) closeBtn.click();
-
-                        const firstLine = txt.split('\n').filter(t => t.trim().length > 0)[0];
-                        return classifyMessage(firstLine);
-                    }
-                }
-                return null;
             }
+            await sleep(checkInterval);
+        }
+        return { status: 'error', msg: 'Hết thời gian chờ / Lỗi mạng' };
+    };
 
-            const observer = new MutationObserver(() => {
-                const res = checkDOMPopups();
-                if (res && !resolved) {
-                    resolved = true;
-                    cleanup();
-                    resolve(res);
-                }
-            });
+    function updateCounterView(total, success, used, failed) {
+        const elTotal = document.getElementById('cnt-total');
+        const elSuccess = document.getElementById('cnt-success');
+        const elUsed = document.getElementById('cnt-used');
+        const elFailed = document.getElementById('cnt-failed');
 
-            observer.observe(document.body, { childList: true, subtree: true });
+        elTotal.textContent = String(total);
+        elSuccess.textContent = String(success);
+        elUsed.textContent = String(used);
+        elFailed.textContent = String(failed);
 
-            function cleanup() {
-                clearTimeout(timer);
-                observer.disconnect();
-                window.removeEventListener('df_redeem_event', onApiEvent);
-            }
-        });
+        void elSuccess.offsetHeight; 
+        void elFailed.offsetHeight;
     }
 
-    async function startEngine() {
-        const isLogged = checkLoginState();
-        if (!isLogged) {
-            log('❌ Bạn chưa đăng nhập tài khoản Delta Force!', 'danger');
-            log('👉 Hãy bấm "Đăng nhập" trên web trước khi chạy.', 'warn');
+    const startBtn = document.getElementById('df-start-btn');
+    const pauseBtn = document.getElementById('df-pause-btn');
+    const stopBtn = document.getElementById('df-stop-btn');
+    const speedSelect = document.getElementById('df-speed-select');
+
+    pauseBtn.addEventListener('click', () => {
+        isPaused = !isPaused;
+        if (isPaused) {
+            pauseBtn.innerText = 'Tiếp tục';
+            addLog('⏸️ Đã tạm dừng tiến trình', 'used');
+        } else {
+            pauseBtn.innerText = 'Tạm dừng';
+            addLog('▶️ Tiếp tục chạy', 'info');
+        }
+    });
+
+    stopBtn.addEventListener('click', () => {
+        if (isRunning) {
+            isRunning = false;
+            addLog('⏹️ Yêu cầu dừng! Đang ngắt hệ thống...', 'error');
+        }
+    });
+
+    async function runBatch() {
+        checkLoginStatus();
+        if (!authData.isLoggedIn) {
+            addLog('❌ Vui lòng đăng nhập và chọn nhân vật trên web trước!', 'error');
             return;
         }
 
-        const rawText = document.getElementById('df-code-input').value;
-        const speed = parseFloat(document.getElementById('df-speed-opt').value) || 2.0;
-        State.speedMultiplier = speed;
+        const textarea = document.getElementById('df-code-input');
+        
+        const rawTokens = textarea.value.split(/[\s,]+/).map(c => c.trim()).filter(c => c.length >= 4);
+        const list = [...new Set(rawTokens)]; 
 
-        // Tách code linh hoạt: xuống dòng, dấu phẩy, khoảng trắng
-        const tokens = rawText.split(/[\s,]+/)
-            .map(c => c.trim())
-            .filter(c => c.length >= 4);
-
-        const uniqueCodes = [...new Set(tokens)];
-
-        if (uniqueCodes.length === 0) {
-            log('Danh sách mã trống hoặc không hợp lệ!', 'warn');
+        if (list.length === 0) {
+            addLog('⚠️ Vui lòng dán code hợp lệ vào ô!', 'error');
             return;
         }
 
-        const inputEl = locateInputTarget();
-        if (!inputEl) {
-            log('Không tìm thấy ô nhập code! Hãy chọn Server/Nhân vật trước.', 'danger');
-            return;
-        }
+        const speed = parseFloat(speedSelect.value) || 1;
+        const inputDelay = Math.max(70, Math.round(650 / speed));
+        const pauseDelay = Math.max(200, Math.round(1800 / speed));
 
-        State.queue = uniqueCodes;
-        State.currentIndex = 0;
-        State.stats = { total: uniqueCodes.length, success: 0, used: 0, invalid: 0, failed: 0 };
-        State.status = 'RUNNING';
-        updateStatsUI();
+        let successCount = 0, usedCount = 0, failCount = 0;
+        updateCounterView(list.length, 0, 0, 0);
 
-        document.getElementById('btn-start').style.display = 'none';
-        document.getElementById('btn-pause').style.display = 'block';
-        document.getElementById('btn-stop').style.display = 'block';
-        log(`Khởi chạy v1.4 Offline: ${uniqueCodes.length} mã (Tốc độ x${speed})`, 'info');
+        isRunning = true;
+        isPaused = false;
+        startBtn.style.display = 'none';
+        pauseBtn.style.display = 'block';
+        pauseBtn.innerText = 'Tạm dừng';
+        stopBtn.style.display = 'block';
+        speedSelect.disabled = true;
 
-        const inputDelay = Math.max(60, Math.round(250 / speed));
-        const postDelay = Math.max(200, Math.round(800 / speed));
+        addLog(`🚀 Bắt đầu chạy ${list.length} mã (Tốc độ x${speed})...`, 'info');
 
-        while (State.currentIndex < State.queue.length) {
-            if (State.status === 'STOPPED') break;
-
-            if (State.status === 'PAUSED') {
-                await sleep(300);
-                continue;
+        for (let i = 0; i < list.length; i++) {
+            if (!isRunning) {
+                addLog(`⏹️ Đã hủy tại mã thứ ${i}/${list.length}`, 'error');
+                break;
             }
 
-            const currentCode = State.queue[State.currentIndex];
-            log(`[${State.currentIndex + 1}/${State.queue.length}] Gửi: ${currentCode}...`, 'info');
+            while (isPaused && isRunning) {
+                await sleep(500); 
+            }
+            if (!isRunning) break;
 
-            const currentInput = locateInputTarget();
+            const code = list[i];
+            addLog(`[${i + 1}/${list.length}] Đang gửi: ${code}...`, 'info');
+
+            const currentInput = getCDKInput();
             if (currentInput) {
-                injectInputValue(currentInput, currentCode);
+                setInputValue(currentInput, code);
+            } else {
+                addLog('❌ Không tìm thấy ô nhập mã! Mất kết nối.', 'error');
+                break;
             }
 
             await sleep(inputDelay);
 
-            const submitBtn = locateSubmitTarget();
+            const submitBtn = getSubmitButton();
             if (submitBtn) {
                 submitBtn.click();
-                const res = await awaitRedeemResult(speed);
-
-                if (res.type === 'success') {
-                    State.stats.success++;
-                    log(`✔ [${currentCode}]: ${res.text}`, 'success');
-                } else if (res.type === 'used') {
-                    State.stats.used++;
-                    log(`⚡ [${currentCode}]: ${res.text}`, 'warn');
-                } else {
-                    State.stats.invalid++;
-                    log(`✖ [${currentCode}]: ${res.text}`, 'danger');
-                }
-
-                if (!authData.isLoggedIn) {
-                    log('⚠ Phát hiện mất phiên đăng nhập! Tiến trình dừng lại.', 'danger');
+                const res = await inspectResponse(speed);
+                
+                if (res.status === 'success') {
+                    successCount++;
+                    addLog(`✔ ${code}: ${res.msg}`, 'success');
+                } else if (res.status === 'used') {
+                    usedCount++;
+                    addLog(`⚡ ${code}: ${res.msg}`, 'used');
+                } else if (res.status === 'expired') {
+                    addLog(`🛑 Bị văng đăng nhập! Dừng tool an toàn.`, 'error');
+                    isRunning = false;
                     break;
+                } else {
+                    failCount++;
+                    addLog(`✖ ${code}: ${res.msg}`, 'error');
                 }
             } else {
-                State.stats.failed++;
-                log(`✖ [${currentCode}]: Không thấy nút Đổi`, 'danger');
+                failCount++;
+                addLog(`✖ ${code}: Không tìm thấy nút Đổi!`, 'error');
             }
 
-            State.currentIndex++;
-            updateStatsUI();
-
-            await sleep(postDelay);
+            updateCounterView(list.length, successCount, usedCount, failCount);
+            await sleep(pauseDelay);
         }
 
-        if (State.status !== 'STOPPED') {
-            log(`Kết thúc! Thành công: ${State.stats.success} | Đã dùng: ${State.stats.used} | Thất bại: ${State.stats.invalid + State.stats.failed}`, 'success');
+        if (isRunning) {
+            addLog(`🏁 Kết thúc! Thành công: ${successCount} | Đã dùng: ${usedCount} | Lỗi: ${failCount}`, 'success');
         }
-        resetControls();
+
+        isRunning = false;
+        startBtn.style.display = 'block';
+        startBtn.innerText = 'Chạy Lại';
+        pauseBtn.style.display = 'none';
+        stopBtn.style.display = 'none';
+        speedSelect.disabled = false;
     }
 
-    function resetControls() {
-        State.status = 'IDLE';
-        const btnStart = document.getElementById('btn-start');
-        if (btnStart) {
-            btnStart.style.display = 'block';
-            btnStart.innerText = 'Chạy lại';
-        }
-        const btnPause = document.getElementById('btn-pause');
-        if (btnPause) btnPause.style.display = 'none';
-        const btnStop = document.getElementById('btn-stop');
-        if (btnStop) btnStop.style.display = 'none';
-    }
-
+    startBtn.addEventListener('click', runBatch);
 })();
