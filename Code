@@ -1,16 +1,76 @@
 // ==UserScript==
 // @name         Delta Force Garena Auto Redeem
 // @namespace    https://staybrowser.com/
-// @version      1.1
-// @description  Hệ thống tự động redeem code Delta Force Garena
-// @author       Vibe Coding x LHyuz
+// @version      1.4
+// @description  Hệ thống tự động redeem code Delta Force Garena v1.4 - Cơ chế khóa phiên bản bắt buộc qua GitHub
+// @author       BumBOBI
 // @match        *://redeem.df.garena.sg/*
 // @grant        GM_addStyle
-// @run-at       document-idle
+// @run-at       document-start
+// @updateURL    https://raw.githubusercontent.com/BumBOBI/Auto-DF/refs/heads/main/Code
+// @downloadURL  https://raw.githubusercontent.com/BumBOBI/Auto-DF/refs/heads/main/Code
 // ==/UserScript==
 
 (function() {
     'use strict';
+
+    const SCRIPT_CONFIG = {
+        version: '1.4',
+        versionCheckUrl: 'https://raw.githubusercontent.com/BumBOBI/Auto-DF/refs/heads/main/Code',
+        repoUrl: 'https://github.com/BumBOBI/Auto-DF'
+    };
+
+    let isVersionVerified = false;
+    let remoteVersionFound = '';
+    let lastApiResponse = null;
+    let authData = {
+        isLoggedIn: false,
+        roleName: '',
+        roleId: '',
+        openid: ''
+    };
+
+    const globalContext = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
+    const originalFetch = globalContext.fetch;
+
+    if (originalFetch) {
+        globalContext.fetch = async function(...args) {
+            const url = typeof args[0] === 'string' ? args[0] : (args[0]?.url || '');
+            const response = await originalFetch.apply(this, args);
+
+            try {
+                if (url.includes('openid=') || url.includes('token=')) {
+                    authData.isLoggedIn = true;
+                    const urlObj = new URL(url, window.location.href);
+                    const oid = urlObj.searchParams.get('openid');
+                    if (oid) authData.openid = oid;
+                    updateAuthUI();
+                }
+
+                if (url.includes('GetRole') || url.includes('role_info') || url.includes('user/info') || url.includes('RoleList')) {
+                    const cloned = response.clone();
+                    cloned.json().then(data => {
+                        if (data && data.data) {
+                            authData.isLoggedIn = true;
+                            const role = data.data.role_name || data.data.role_id || data.data.nick_name || (Array.isArray(data.data.roles) && data.data.roles[0]?.role_name);
+                            if (role) authData.roleName = String(role);
+                            updateAuthUI();
+                        }
+                    }).catch(() => {});
+                }
+
+                if (url.includes('RedeemCDKey') || url.includes('CdkV2')) {
+                    const cloned = response.clone();
+                    cloned.json().then(data => {
+                        lastApiResponse = data;
+                        window.dispatchEvent(new CustomEvent('df_redeem_event', { detail: data }));
+                    }).catch(() => {});
+                }
+            } catch (e) {}
+
+            return response;
+        };
+    }
 
     const State = {
         status: 'IDLE',
@@ -23,7 +83,8 @@
             invalid: 0,
             failed: 0
         },
-        speedMultiplier: 1.0
+        speedMultiplier: 2.0,
+        failedCodes: []
     };
 
     const styles = `
@@ -111,10 +172,80 @@
         }
 
         .df-body {
+            position: relative;
             padding: 14px;
             display: flex;
             flex-direction: column;
             gap: 10px;
+        }
+
+        /* Lớp phủ chặn khi phiên bản không trùng khớp */
+        #df-lock-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(11, 13, 19, 0.96);
+            backdrop-filter: blur(4px);
+            z-index: 1000;
+            display: none;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            text-align: center;
+            padding: 20px;
+            box-sizing: border-box;
+            gap: 12px;
+        }
+        .df-lock-title {
+            color: var(--df-danger);
+            font-size: 15px;
+            font-weight: 900;
+            text-transform: uppercase;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .df-lock-desc {
+            color: #d1d5db;
+            font-size: 12px;
+            line-height: 1.5;
+        }
+        .df-lock-desc strong {
+            color: var(--df-warn);
+        }
+        .df-btn-reinstall {
+            background: linear-gradient(135deg, var(--df-primary), #d84315);
+            color: #fff;
+            border: none;
+            padding: 10px 16px;
+            border-radius: 8px;
+            font-weight: 800;
+            font-size: 12px;
+            cursor: pointer;
+            box-shadow: 0 4px 15px rgba(255,87,34,0.4);
+            text-decoration: none;
+            display: inline-block;
+            margin-top: 4px;
+        }
+
+        .df-auth-banner {
+            padding: 7px 10px;
+            border-radius: 6px;
+            font-size: 11px;
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            background: #1c1316;
+            border: 1px solid rgba(255, 82, 82, 0.3);
+            color: var(--df-danger);
+        }
+        .df-auth-banner.df-logged {
+            background: #102619;
+            border-color: rgba(0, 230, 118, 0.3);
+            color: var(--df-success);
         }
 
         .df-stats-grid {
@@ -254,80 +385,280 @@
         .df-log-info { color: var(--df-info); }
     `;
 
-    if (typeof GM_addStyle !== "undefined") {
-        GM_addStyle(styles);
-    } else {
-        const tag = document.createElement('style');
-        tag.textContent = styles;
-        document.head.appendChild(tag);
+    function initUI() {
+        if (typeof GM_addStyle !== "undefined") {
+            GM_addStyle(styles);
+        } else {
+            const tag = document.createElement('style');
+            tag.textContent = styles;
+            document.head.appendChild(tag);
+        }
+
+        const trigger = document.createElement('div');
+        trigger.id = 'df-floating-trigger';
+        trigger.innerHTML = `<span>⚡</span><span>DF TOOL 1.4</span>`;
+
+        const dashboard = document.createElement('div');
+        dashboard.id = 'df-dashboard-v3';
+        dashboard.innerHTML = `
+            <div class="df-header">
+                <div class="df-title">
+                    <span>🎮 Delta Force Redeem</span>
+                    <span class="df-badge-ver" id="df-ver-tag">v${SCRIPT_CONFIG.version}</span>
+                </div>
+                <div style="display:flex; align-items:center; gap:8px;">
+                    <span id="df-btn-check-update" style="cursor:pointer; font-size:11px; color:var(--df-info); text-decoration:none;" title="Xác thực phiên bản GitHub">🔍 Kiểm tra</span>
+                    <span style="cursor:pointer; font-size:16px; color:#888;" id="df-btn-close">✕</span>
+                </div>
+            </div>
+            <div class="df-body">
+                <!-- Lớp phủ khóa cưỡng chế nếu không trùng phiên bản -->
+                <div id="df-lock-overlay">
+                    <div class="df-lock-title">⛔ ĐÃ BỊ KHÓA SỬ DỤNG</div>
+                    <div class="df-lock-desc" id="df-lock-msg">
+                        Phiên bản bạn đang dùng không khớp với phiên bản máy chủ.<br>
+                        Vui lòng <strong>XÓA SCRIPT CŨ</strong> và <strong>TẢI LẠI</strong> để tiếp tục!
+                    </div>
+                    <button class="df-btn-reinstall" id="btn-reinstall-link">📥 Tải lại bản mới từ GitHub</button>
+                </div>
+
+                <div class="df-auth-banner" id="df-auth-box">
+                    <span id="df-auth-text">🔴 Đang kiểm tra đăng nhập...</span>
+                    <span id="df-auth-sub" style="font-size:10px; opacity:0.8;"></span>
+                </div>
+
+                <div class="df-stats-grid">
+                    <div class="df-stat-card">
+                        <div class="df-stat-val" id="stat-total" style="color: var(--df-info)">0</div>
+                        <div class="df-stat-lbl">Tổng mã</div>
+                    </div>
+                    <div class="df-stat-card">
+                        <div class="df-stat-val" id="stat-success" style="color: var(--df-success)">0</div>
+                        <div class="df-stat-lbl">Thành công</div>
+                    </div>
+                    <div class="df-stat-card">
+                        <div class="df-stat-val" id="stat-used" style="color: var(--df-warn)">0</div>
+                        <div class="df-stat-lbl">Đã nhận</div>
+                    </div>
+                    <div class="df-stat-card">
+                        <div class="df-stat-val" id="stat-failed" style="color: var(--df-danger)">0</div>
+                        <div class="df-stat-lbl">Thất bại</div>
+                    </div>
+                </div>
+
+                <div class="df-progress-wrap">
+                    <div class="df-progress-bar" id="df-progress-bar"></div>
+                </div>
+
+                <div class="df-setting-row">
+                    <span>Tốc độ thực thi:</span>
+                    <select id="df-speed-opt" class="df-select">
+                        <option value="0.75">x0.75</option>
+                        <option value="1.0">x1.0</option>
+                        <option value="1.5">x1.5</option>
+                        <option value="2.0" selected>x2.0</option>
+                        <option value="3.0">x3.0</option>
+                        <option value="4.0">x4.0</option>
+                    </select>
+                </div>
+
+                <textarea id="df-code-input" placeholder="Dán danh sách code (dòng hoặc dấu cách)..."></textarea>
+
+                <div class="df-actions">
+                    <button class="df-btn df-btn-primary" id="btn-start">Bắt đầu chạy</button>
+                    <button class="df-btn df-btn-warn" id="btn-pause">Tạm dừng</button>
+                    <button class="df-btn df-btn-danger" id="btn-stop">Dừng hẳn</button>
+                </div>
+
+                <div id="df-logs-panel"></div>
+            </div>
+        `;
+
+        document.body.appendChild(trigger);
+        document.body.appendChild(dashboard);
+
+        trigger.addEventListener('click', () => {
+            dashboard.style.display = (dashboard.style.display === 'flex' ? 'none' : 'flex');
+            checkLoginState();
+            if (!isVersionVerified) enforceVersionCheck(true);
+        });
+        document.getElementById('df-btn-close').addEventListener('click', () => {
+            dashboard.style.display = 'none';
+        });
+
+        document.getElementById('btn-reinstall-link').addEventListener('click', () => {
+            window.open(SCRIPT_CONFIG.versionCheckUrl, '_blank');
+        });
+
+        document.getElementById('btn-start').addEventListener('click', startEngine);
+        document.getElementById('btn-pause').addEventListener('click', () => {
+            if (State.status === 'RUNNING') {
+                State.status = 'PAUSED';
+                document.getElementById('btn-pause').innerText = 'Tiếp tục';
+                log('Đã tạm dừng tiến trình', 'warn');
+            } else if (State.status === 'PAUSED') {
+                State.status = 'RUNNING';
+                document.getElementById('btn-pause').innerText = 'Tạm dừng';
+                log('Tiếp tục tiến trình', 'info');
+            }
+        });
+        document.getElementById('btn-stop').addEventListener('click', () => {
+            State.status = 'STOPPED';
+            log('Đã hủy tiến trình', 'danger');
+            resetControls();
+        });
+
+        const updateBtn = document.getElementById('df-btn-check-update');
+        if (updateBtn) {
+            updateBtn.addEventListener('click', () => enforceVersionCheck(true));
+        }
+
+        setInterval(checkLoginState, 2000);
+        // Tự động kiểm tra phiên bản ngay sau khi khởi động
+        setTimeout(() => enforceVersionCheck(false), 1500);
     }
 
-    const trigger = document.createElement('div');
-    trigger.id = 'df-floating-trigger';
-    trigger.innerHTML = `<span>⚡</span><span>DF TOOL 1.1</span>`;
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', initUI);
+    } else {
+        initUI();
+    }
 
-    const dashboard = document.createElement('div');
-    dashboard.id = 'df-dashboard-v3';
-    dashboard.innerHTML = `
-        <div class="df-header">
-            <div class="df-title">
-                <span>🎮 Delta Force Redeem</span>
-                <span class="df-badge-ver">v1.1</span>
-            </div>
-            <span style="cursor:pointer; font-size:16px; color:#888;" id="df-btn-close">✕</span>
-        </div>
-        <div class="df-body">
-            <div class="df-stats-grid">
-                <div class="df-stat-card">
-                    <div class="df-stat-val" id="stat-total" style="color: var(--df-info)">0</div>
-                    <div class="df-stat-lbl">Tổng mã</div>
-                </div>
-                <div class="df-stat-card">
-                    <div class="df-stat-val" id="stat-success" style="color: var(--df-success)">0</div>
-                    <div class="df-stat-lbl">Thành công</div>
-                </div>
-                <div class="df-stat-card">
-                    <div class="df-stat-val" id="stat-used" style="color: var(--df-warn)">0</div>
-                    <div class="df-stat-lbl">Đã nhận</div>
-                </div>
-                <div class="df-stat-card">
-                    <div class="df-stat-val" id="stat-failed" style="color: var(--df-danger)">0</div>
-                    <div class="df-stat-lbl">Thất bại</div>
-                </div>
-            </div>
+    function parseRemoteVersion(text) {
+        if (!text) return null;
+        // Bắt theo cú pháp UserScript: @version x.x
+        const headerMatch = text.match(/@version\s+([0-9.]+)/i);
+        if (headerMatch && headerMatch[1]) return headerMatch[1].trim();
 
-            <div class="df-progress-wrap">
-                <div class="df-progress-bar" id="df-progress-bar"></div>
-            </div>
+        // Bắt nếu file chỉ ghi trực tiếp phiên bản như "1.4" hoặc "v1.4"
+        const rawMatch = text.trim().match(/^v?([0-9.]+)/i);
+        if (rawMatch && rawMatch[1]) return rawMatch[1].trim();
 
-            <div class="df-setting-row">
-                <span>Tốc độ thực thi:</span>
-                <select id="df-speed-opt" class="df-select">
-                    <option value="0.75">x0.75</option>
-                    <option value="1.0">x1.0</option>
-                    <option value="2.0" selected>x2.0</option>
-                    <option value="3.0">x3.0</option>
-                    <option value="4.0">x4.0</option>
-                </select>
-            </div>
+        return null;
+    }
 
-            <textarea id="df-code-input" placeholder="Dán danh sách mã code..."></textarea>
+    async function enforceVersionCheck(isManual = false) {
+        const lockOverlay = document.getElementById('df-lock-overlay');
+        const lockMsg = document.getElementById('df-lock-msg');
+        const verTag = document.getElementById('df-ver-tag');
 
-            <div class="df-actions">
-                <button class="df-btn df-btn-primary" id="btn-start">Bắt đầu chạy</button>
-                <button class="df-btn df-btn-warn" id="btn-pause">Tạm dừng</button>
-                <button class="df-btn df-btn-danger" id="btn-stop">Dừng hẳn</button>
-            </div>
+        try {
+            if (isManual) log('🔍 Đang đối soát phiên bản với GitHub...', 'info');
 
-            <div id="df-logs-panel"></div>
-        </div>
-    `;
+            const res = await fetch(`${SCRIPT_CONFIG.versionCheckUrl}?t=${Date.now()}`, {
+                cache: 'no-store',
+                headers: { 'Cache-Control': 'no-cache' }
+            });
 
-    document.body.appendChild(trigger);
-    document.body.appendChild(dashboard);
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
 
-    const logsContainer = document.getElementById('df-logs-panel');
+            const text = await res.text();
+            const remoteVer = parseRemoteVersion(text);
+
+            if (!remoteVer) {
+                throw new Error('Không đọc được phiên bản từ GitHub');
+            }
+
+            remoteVersionFound = remoteVer;
+
+            // KIỂM TRA ĐIỀU KIỆN: Bắt buộc cùng phiên bản mới cho dùng
+            if (remoteVer === SCRIPT_CONFIG.version) {
+                isVersionVerified = true;
+                if (lockOverlay) lockOverlay.style.display = 'none';
+                if (verTag) {
+                    verTag.innerText = `v${SCRIPT_CONFIG.version} (Hợp lệ)`;
+                    verTag.style.background = 'rgba(0, 230, 118, 0.2)';
+                    verTag.style.color = 'var(--df-success)';
+                }
+                if (isManual) log(`✔ Phiên bản hợp lệ (v${SCRIPT_CONFIG.version}). Được phép sử dụng!`, 'success');
+            } else {
+                // Khác phiên bản => KHÓA TOÀN BỘ CÔNG CỤ
+                isVersionVerified = false;
+                if (lockOverlay) {
+                    lockOverlay.style.display = 'flex';
+                    if (lockMsg) {
+                        lockMsg.innerHTML = `
+                            Phiên bản hiện tại: <strong>v${SCRIPT_CONFIG.version}</strong><br>
+                            Phiên bản máy chủ yêu cầu: <strong>v${remoteVer}</strong><br><br>
+                            ⚠️ Bản này không còn trùng khớp.<br>
+                            Bạn bắt buộc phải <strong>XÓA SCRIPT CŨ</strong> và <strong>TẢI LẠI</strong> bản mới!
+                        `;
+                    }
+                }
+                if (verTag) {
+                    verTag.innerText = `LỆCH v${remoteVer}`;
+                    verTag.style.background = 'rgba(255, 82, 82, 0.2)';
+                    verTag.style.color = 'var(--df-danger)';
+                }
+                log(`⛔ Phiên bản không khớp (Hiện tại: v${SCRIPT_CONFIG.version} ≠ Máy chủ: v${remoteVer}). Đã khóa công cụ!`, 'danger');
+            }
+        } catch (err) {
+            if (isManual) {
+                log(`✖ Không thể kiểm tra phiên bản: ${err.message}`, 'warn');
+            }
+        }
+    }
+
+    function checkLoginState() {
+        const dashboard = document.getElementById('df-dashboard-v3');
+        const elements = Array.from(document.querySelectorAll('a, button, div, span, p'))
+            .filter(el => !(dashboard && dashboard.contains(el)) && el.offsetParent !== null);
+
+        const hasLoginText = elements.some(el => {
+            const txt = (el.innerText || el.textContent || '').trim().toLowerCase();
+            return txt === 'đăng nhập' || txt === 'login' || txt === 'sign in';
+        });
+
+        const hasLogoutText = elements.some(el => {
+            const txt = (el.innerText || el.textContent || '').trim().toLowerCase();
+            return txt === 'đăng xuất' || txt === 'logout' || txt === 'thoát';
+        });
+
+        const roleElements = elements.filter(el => {
+            const txt = (el.innerText || el.textContent || '').trim();
+            return /nhân vật:|server:|uid:|role:|máy chủ:/i.test(txt);
+        });
+
+        if (roleElements.length > 0) {
+            authData.isLoggedIn = true;
+            if (!authData.roleName) {
+                authData.roleName = roleElements[0].innerText.replace(/\n/g, ' ').trim();
+            }
+        } else if (hasLogoutText) {
+            authData.isLoggedIn = true;
+        } else if (hasLoginText && !authData.openid) {
+            authData.isLoggedIn = false;
+        }
+
+        const input = locateInputTarget();
+        if (input && !hasLoginText) {
+            authData.isLoggedIn = true;
+        }
+
+        updateAuthUI();
+        return authData.isLoggedIn;
+    }
+
+    function updateAuthUI() {
+        const box = document.getElementById('df-auth-box');
+        const txt = document.getElementById('df-auth-text');
+        const sub = document.getElementById('df-auth-sub');
+        if (!box || !txt) return;
+
+        if (authData.isLoggedIn) {
+            box.className = 'df-auth-banner df-logged';
+            txt.innerText = '🟢 Đã đăng nhập game';
+            sub.innerText = authData.roleName ? `(${authData.roleName.substring(0, 18)})` : (authData.openid ? `(ID: ${authData.openid.slice(-6)})` : '');
+        } else {
+            box.className = 'df-auth-banner';
+            txt.innerText = '🔴 Chưa đăng nhập tài khoản';
+            sub.innerText = 'Hãy đăng nhập trước';
+        }
+    }
+
     function log(message, type = 'info') {
+        const logsContainer = document.getElementById('df-logs-panel');
+        if (!logsContainer) return;
         const entry = document.createElement('div');
         entry.className = 'df-log-entry';
         const now = new Date();
@@ -358,13 +689,6 @@
         if (elFailed) void elFailed.offsetHeight;
     }
 
-    trigger.addEventListener('click', () => {
-        dashboard.style.display = (dashboard.style.display === 'flex' ? 'none' : 'flex');
-    });
-    document.getElementById('df-btn-close').addEventListener('click', () => {
-        dashboard.style.display = 'none';
-    });
-
     const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
     function injectInputValue(inputEl, value) {
@@ -381,8 +705,9 @@
     }
 
     function locateInputTarget() {
+        const dashboard = document.getElementById('df-dashboard-v3');
         const list = Array.from(document.querySelectorAll('input[type="text"], input:not([type])'))
-            .filter(el => !dashboard.contains(el) && el.offsetParent !== null);
+            .filter(el => !(dashboard && dashboard.contains(el)) && el.offsetParent !== null);
 
         let target = list.find(el => {
             const str = (el.placeholder + ' ' + el.id + ' ' + el.name + ' ' + el.className).toLowerCase();
@@ -392,8 +717,9 @@
     }
 
     function locateSubmitTarget() {
+        const dashboard = document.getElementById('df-dashboard-v3');
         const buttons = Array.from(document.querySelectorAll('button, div[role="button"], a, [class*="btn"], [class*="button"], [class*="submit"]'))
-            .filter(b => !dashboard.contains(b) && b.offsetParent !== null);
+            .filter(b => !(dashboard && dashboard.contains(b)) && b.offsetParent !== null);
 
         return buttons.find(b => {
             const txt = (b.innerText || b.textContent || '').trim().toLowerCase();
@@ -401,33 +727,85 @@
         });
     }
 
+    function parseApiResponse(json) {
+        if (!json) return null;
+        const code = json.code;
+        const msg = json.msg || '';
+
+        if (code === 0) {
+            return { type: 'success', text: msg || 'Đổi thành công' };
+        }
+        if (code === 400067 || code === 400065 || code === 400066 || /limit|reached|đã nhận|đã đổi|already/i.test(msg)) {
+            return { type: 'used', text: msg || 'Đã đạt giới hạn nhóm code (Đã nhận)' };
+        }
+        if (code === 400001 || code === 400003 || code === 400006 || /token|login|đăng nhập/i.test(msg)) {
+            authData.isLoggedIn = false;
+            updateAuthUI();
+            return { type: 'failed', text: 'Phiên đăng nhập hết hạn! Hãy đăng nhập lại' };
+        }
+        return { type: 'invalid', text: msg || `Lỗi (${code})` };
+    }
+
     function classifyMessage(text) {
         const lower = text.toLowerCase();
         if (/thành công|chúc mừng|congratulations|success/i.test(lower)) {
             return { type: 'success', text };
         }
-        if (/đã sử dụng|đã nhận|đã đổi|already/i.test(lower)) {
+        if (/đã sử dụng|đã nhận|đã đổi|already|limit|reached|giới hạn/i.test(lower)) {
             return { type: 'used', text };
+        }
+        if (/đăng nhập|login|hết hạn phiên/i.test(lower)) {
+            authData.isLoggedIn = false;
+            updateAuthUI();
+            return { type: 'failed', text };
         }
         return { type: 'invalid', text };
     }
 
-    function awaitModalResponse(speed) {
+    function dismissAnyPopup() {
+        const dashboard = document.getElementById('df-dashboard-v3');
+        const popups = Array.from(document.querySelectorAll('.van-dialog, .van-toast, .van-popup, .modal, .dialog, .popup, div[role="dialog"]'))
+            .filter(el => !(dashboard && dashboard.contains(el)) && el.getBoundingClientRect().width > 0);
+
+        for (const p of popups) {
+            const closeBtn = Array.from(p.querySelectorAll('button, div[role="button"], span, a'))
+                .find(b => /ok|xác nhận|confirm|đóng|close|biết rồi/i.test((b.innerText || b.textContent || '').toLowerCase()));
+            if (closeBtn) closeBtn.click();
+        }
+    }
+
+    function awaitRedeemResult(speed) {
         return new Promise((resolve) => {
-            const timeoutMs = Math.max(800, Math.round(3500 / speed));
+            const timeoutMs = Math.max(900, Math.round(3500 / speed));
             let resolved = false;
+            lastApiResponse = null;
+
+            const onApiEvent = (e) => {
+                if (!resolved && e.detail) {
+                    resolved = true;
+                    cleanup();
+                    dismissAnyPopup();
+                    resolve(parseApiResponse(e.detail));
+                }
+            };
+            window.addEventListener('df_redeem_event', onApiEvent, { once: true });
 
             const timer = setTimeout(() => {
                 if (!resolved) {
                     resolved = true;
                     cleanup();
-                    resolve({ type: 'failed', text: 'Quá thời gian phản hồi' });
+                    if (lastApiResponse) {
+                        resolve(parseApiResponse(lastApiResponse));
+                    } else {
+                        resolve({ type: 'failed', text: 'Quá thời gian phản hồi' });
+                    }
                 }
             }, timeoutMs);
 
-            function checkExisting() {
+            function checkDOMPopups() {
+                const dashboard = document.getElementById('df-dashboard-v3');
                 const popups = Array.from(document.querySelectorAll('.van-dialog, .van-toast, .van-popup, .modal, .dialog, .popup, div[role="dialog"], [class*="modal"], [class*="dialog"], [class*="popup"], [class*="toast"], [class*="notice"], [class*="alert"]'))
-                    .filter(el => !dashboard.contains(el) && el.getBoundingClientRect().width > 0 && window.getComputedStyle(el).display !== 'none');
+                    .filter(el => !(dashboard && dashboard.contains(el)) && el.getBoundingClientRect().width > 0 && window.getComputedStyle(el).display !== 'none');
 
                 for (const p of popups) {
                     const txt = (p.innerText || p.textContent || "").trim();
@@ -444,7 +822,7 @@
             }
 
             const observer = new MutationObserver(() => {
-                const res = checkExisting();
+                const res = checkDOMPopups();
                 if (res && !resolved) {
                     resolved = true;
                     cleanup();
@@ -457,27 +835,37 @@
             function cleanup() {
                 clearTimeout(timer);
                 observer.disconnect();
-            }
-
-            const immediate = checkExisting();
-            if (immediate && !resolved) {
-                resolved = true;
-                cleanup();
-                resolve(immediate);
+                window.removeEventListener('df_redeem_event', onApiEvent);
             }
         });
     }
 
     async function startEngine() {
+        // KIỂM TRA KHÓA PHIÊN BẢN CƯỠNG CHẾ
+        if (!isVersionVerified) {
+            log('⛔ Công cụ đang bị khóa do phiên bản không khớp với GitHub!', 'danger');
+            log('👉 Hãy XÓA script cũ trong trình duyệt và tải lại bản mới.', 'warn');
+            const lockOverlay = document.getElementById('df-lock-overlay');
+            if (lockOverlay) lockOverlay.style.display = 'flex';
+            return;
+        }
+
+        const isLogged = checkLoginState();
+        if (!isLogged) {
+            log('❌ Bạn chưa đăng nhập tài khoản Delta Force!', 'danger');
+            log('👉 Hãy bấm "Đăng nhập" trên web trước khi chạy.', 'warn');
+            return;
+        }
+
         const rawText = document.getElementById('df-code-input').value;
         const speed = parseFloat(document.getElementById('df-speed-opt').value) || 2.0;
         State.speedMultiplier = speed;
 
-        const lines = rawText.split('\n')
+        const tokens = rawText.split(/[\s,]+/)
             .map(c => c.trim())
             .filter(c => c.length >= 4);
 
-        const uniqueCodes = [...new Set(lines)];
+        const uniqueCodes = [...new Set(tokens)];
 
         if (uniqueCodes.length === 0) {
             log('Danh sách mã trống hoặc không hợp lệ!', 'warn');
@@ -486,7 +874,7 @@
 
         const inputEl = locateInputTarget();
         if (!inputEl) {
-            log('Không tìm thấy ô nhập code! Hãy đăng nhập trước.', 'danger');
+            log('Không tìm thấy ô nhập code! Hãy chọn Server/Nhân vật trước.', 'danger');
             return;
         }
 
@@ -499,10 +887,10 @@
         document.getElementById('btn-start').style.display = 'none';
         document.getElementById('btn-pause').style.display = 'block';
         document.getElementById('btn-stop').style.display = 'block';
-        log(`Khởi chạy v1.1: ${uniqueCodes.length} mã (Tốc độ x${speed})`, 'info');
+        log(`Khởi chạy v1.4: ${uniqueCodes.length} mã (Tốc độ x${speed})`, 'info');
 
-        const inputDelay = Math.max(80, Math.round(350 / speed));
-        const postDelay = Math.max(250, Math.round(1100 / speed));
+        const inputDelay = Math.max(60, Math.round(250 / speed));
+        const postDelay = Math.max(200, Math.round(800 / speed));
 
         while (State.currentIndex < State.queue.length) {
             if (State.status === 'STOPPED') break;
@@ -525,7 +913,7 @@
             const submitBtn = locateSubmitTarget();
             if (submitBtn) {
                 submitBtn.click();
-                const res = await awaitModalResponse(speed);
+                const res = await awaitRedeemResult(speed);
 
                 if (res.type === 'success') {
                     State.stats.success++;
@@ -536,6 +924,11 @@
                 } else {
                     State.stats.invalid++;
                     log(`✖ [${currentCode}]: ${res.text}`, 'danger');
+                }
+
+                if (!authData.isLoggedIn) {
+                    log('⚠ Phát hiện mất phiên đăng nhập! Tiến trình dừng lại.', 'danger');
+                    break;
                 }
             } else {
                 State.stats.failed++;
@@ -548,36 +941,21 @@
             await sleep(postDelay);
         }
 
-        log(`Kết thúc! Thành công: ${State.stats.success} | Đã dùng: ${State.stats.used} | Lỗi: ${State.stats.invalid + State.stats.failed}`, 'success');
+        log(`Kết thúc! Thành công: ${State.stats.success} | Đã dùng: ${State.stats.used} | Thất bại: ${State.stats.invalid + State.stats.failed}`, 'success');
         resetControls();
     }
 
     function resetControls() {
         State.status = 'IDLE';
-        document.getElementById('btn-start').style.display = 'block';
-        document.getElementById('btn-start').innerText = 'Chạy lại';
-        document.getElementById('btn-pause').style.display = 'none';
-        document.getElementById('btn-stop').style.display = 'none';
-    }
-
-    document.getElementById('btn-start').addEventListener('click', startEngine);
-
-    document.getElementById('btn-pause').addEventListener('click', () => {
-        if (State.status === 'RUNNING') {
-            State.status = 'PAUSED';
-            document.getElementById('btn-pause').innerText = 'Tiếp tục';
-            log('Đã tạm dừng tiến trình', 'warn');
-        } else if (State.status === 'PAUSED') {
-            State.status = 'RUNNING';
-            document.getElementById('btn-pause').innerText = 'Tạm dừng';
-            log('Tiếp tục tiến trình', 'info');
+        const btnStart = document.getElementById('btn-start');
+        if (btnStart) {
+            btnStart.style.display = 'block';
+            btnStart.innerText = 'Chạy lại';
         }
-    });
-
-    document.getElementById('btn-stop').addEventListener('click', () => {
-        State.status = 'STOPPED';
-        log('Đã hủy tiến trình', 'danger');
-        resetControls();
-    });
+        const btnPause = document.getElementById('btn-pause');
+        if (btnPause) btnPause.style.display = 'none';
+        const btnStop = document.getElementById('btn-stop');
+        if (btnStop) btnStop.style.display = 'none';
+    }
 
 })();
