@@ -1,9 +1,9 @@
 // ==UserScript==
-// @name         Delta Force Garena Auto Redeem (Engine Rebuild v3.1)
+// @name         Delta Force Garena Auto Redeem
 // @namespace    https://staybrowser.com/
 // @version      1.1
-// @description  Hệ thống tự động redeem code Delta Force kiến trúc v3.1: State Engine, Queue deduplication, MutationObserver, Bộ lọc kết quả chi tiết
-// @author       Vibe Coding x Lhyuz
+// @description  Hệ thống tự động redeem code Delta Force Garena
+// @author       Vibe Coding x LHyuz
 // @match        *://redeem.df.garena.sg/*
 // @grant        GM_addStyle
 // @run-at       document-idle
@@ -12,11 +12,8 @@
 (function() {
     'use strict';
 
-    /* ==========================================================================
-       1. STATE ENGINE & EVENT BUS
-       ========================================================================== */
     const State = {
-        status: 'IDLE', // IDLE, RUNNING, PAUSED, STOPPED
+        status: 'IDLE',
         queue: [],
         currentIndex: 0,
         stats: {
@@ -26,26 +23,9 @@
             invalid: 0,
             failed: 0
         },
-        speedMultiplier: 1.0,
-        failedCodes: []
+        speedMultiplier: 1.0
     };
 
-    const EventBus = {
-        listeners: {},
-        on(event, callback) {
-            if (!this.listeners[event]) this.listeners[event] = [];
-            this.listeners[event].push(callback);
-        },
-        emit(event, data) {
-            if (this.listeners[event]) {
-                this.listeners[event].forEach(cb => cb(data));
-            }
-        }
-    };
-
-    /* ==========================================================================
-       2. UI STYLES (Modern Cyberpunk / Dark Dashboard)
-       ========================================================================== */
     const styles = `
         :root {
             --df-primary: #ff5722;
@@ -282,9 +262,6 @@
         document.head.appendChild(tag);
     }
 
-    /* ==========================================================================
-       3. DOM MOUNTING & UI SETUP
-       ========================================================================== */
     const trigger = document.createElement('div');
     trigger.id = 'df-floating-trigger';
     trigger.innerHTML = `<span>⚡</span><span>DF TOOL 1.1</span>`;
@@ -295,7 +272,7 @@
         <div class="df-header">
             <div class="df-title">
                 <span>🎮 Delta Force Redeem</span>
-                <span class="df-badge-ver">v3.1 Rebuild</span>
+                <span class="df-badge-ver">v1.1</span>
             </div>
             <span style="cursor:pointer; font-size:16px; color:#888;" id="df-btn-close">✕</span>
         </div>
@@ -314,8 +291,8 @@
                     <div class="df-stat-lbl">Đã nhận</div>
                 </div>
                 <div class="df-stat-card">
-                    <div class="df-stat-val" id="stat-invalid" style="color: var(--df-danger)">0</div>
-                    <div class="df-stat-lbl">Lỗi/Hỏng</div>
+                    <div class="df-stat-val" id="stat-failed" style="color: var(--df-danger)">0</div>
+                    <div class="df-stat-lbl">Thất bại</div>
                 </div>
             </div>
 
@@ -326,15 +303,15 @@
             <div class="df-setting-row">
                 <span>Tốc độ thực thi:</span>
                 <select id="df-speed-opt" class="df-select">
-                    <option value="0.75">x0.75 (An toàn)</option>
-                    <option value="1.0" selected>x1.0 (Chuẩn)</option>
-                    <option value="2.0">x2.0 (Nhanh)</option>
-                    <option value="3.0">x3.0 (Siêu tốc)</option>
-                    <option value="4.0">x4.0 (Cực hạn)</option>
+                    <option value="0.75">x0.75</option>
+                    <option value="1.0">x1.0</option>
+                    <option value="2.0" selected>x2.0</option>
+                    <option value="3.0">x3.0</option>
+                    <option value="4.0">x4.0</option>
                 </select>
             </div>
 
-            <textarea id="df-code-input" placeholder="Dán danh sách mã code... (Tự động lọc trùng)"></textarea>
+            <textarea id="df-code-input" placeholder="Dán danh sách mã code..."></textarea>
 
             <div class="df-actions">
                 <button class="df-btn df-btn-primary" id="btn-start">Bắt đầu chạy</button>
@@ -349,9 +326,6 @@
     document.body.appendChild(trigger);
     document.body.appendChild(dashboard);
 
-    /* ==========================================================================
-       4. UI HELPERS & LOGGING
-       ========================================================================== */
     const logsContainer = document.getElementById('df-logs-panel');
     function log(message, type = 'info') {
         const entry = document.createElement('div');
@@ -364,15 +338,24 @@
     }
 
     function updateStatsUI() {
-        document.getElementById('stat-total').innerText = State.stats.total;
-        document.getElementById('stat-success').innerText = State.stats.success;
-        document.getElementById('stat-used').innerText = State.stats.used;
-        document.getElementById('stat-invalid').innerText = State.stats.invalid;
+        const elTotal = document.getElementById('stat-total');
+        const elSuccess = document.getElementById('stat-success');
+        const elUsed = document.getElementById('stat-used');
+        const elFailed = document.getElementById('stat-failed');
+        const elProgress = document.getElementById('df-progress-bar');
 
-        const progressPercent = State.stats.total > 0
-            ? Math.round((State.currentIndex / State.stats.total) * 100)
-            : 0;
-        document.getElementById('df-progress-bar').style.width = `${progressPercent}%`;
+        if (elTotal) elTotal.textContent = String(State.stats.total);
+        if (elSuccess) elSuccess.textContent = String(State.stats.success);
+        if (elUsed) elUsed.textContent = String(State.stats.used);
+        if (elFailed) elFailed.textContent = String(State.stats.invalid + State.stats.failed);
+
+        if (elProgress && State.stats.total > 0) {
+            const progressPercent = Math.min(100, Math.round((State.currentIndex / State.stats.total) * 100));
+            elProgress.style.width = `${progressPercent}%`;
+        }
+
+        if (elSuccess) void elSuccess.offsetHeight;
+        if (elFailed) void elFailed.offsetHeight;
     }
 
     trigger.addEventListener('click', () => {
@@ -382,18 +365,18 @@
         dashboard.style.display = 'none';
     });
 
-    /* ==========================================================================
-       5. CORE REDEEM ENGINE (Rebuild v3.1 Engine)
-       ========================================================================== */
     const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-    // Kích hoạt mô phỏng gõ chữ chuẩn DOM InputEvent
     function injectInputValue(inputEl, value) {
         inputEl.focus();
-        const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
-        nativeSetter.call(inputEl, value);
+        inputEl.value = value;
+        const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")?.set;
+        if (nativeSetter) {
+            nativeSetter.call(inputEl, value);
+        }
         inputEl.dispatchEvent(new Event('input', { bubbles: true }));
         inputEl.dispatchEvent(new Event('change', { bubbles: true }));
+        inputEl.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true }));
         inputEl.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true }));
     }
 
@@ -403,22 +386,21 @@
 
         let target = list.find(el => {
             const str = (el.placeholder + ' ' + el.id + ' ' + el.name + ' ' + el.className).toLowerCase();
-            return str.includes('cdk') || str.includes('code') || str.includes('mã');
+            return str.includes('cdk') || str.includes('code') || str.includes('mã') || str.includes('nhập');
         });
         return target || (list.length > 0 ? list[list.length - 1] : null);
     }
 
     function locateSubmitTarget() {
-        const buttons = Array.from(document.querySelectorAll('button, div[role="button"], a, [class*="btn"]'))
+        const buttons = Array.from(document.querySelectorAll('button, div[role="button"], a, [class*="btn"], [class*="button"], [class*="submit"]'))
             .filter(b => !dashboard.contains(b) && b.offsetParent !== null);
 
         return buttons.find(b => {
             const txt = (b.innerText || b.textContent || '').trim().toLowerCase();
-            return ['đổi', 'xác nhận', 'nhận', 'redeem', 'exchange', 'confirm'].includes(txt);
+            return txt.includes('đổi') || txt.includes('xác nhận') || txt.includes('nhận') || txt.includes('redeem') || txt.includes('exchange') || txt.includes('confirm');
         });
     }
 
-    // Cơ chế phân loại kết quả thông minh v3.1
     function classifyMessage(text) {
         const lower = text.toLowerCase();
         if (/thành công|chúc mừng|congratulations|success/i.test(lower)) {
@@ -427,16 +409,12 @@
         if (/đã sử dụng|đã nhận|đã đổi|already/i.test(lower)) {
             return { type: 'used', text };
         }
-        if (/hết hạn|không tồn tại|không hợp lệ|invalid|expired|sai mã/i.test(lower)) {
-            return { type: 'invalid', text };
-        }
-        return { type: 'failed', text };
+        return { type: 'invalid', text };
     }
 
-    // Bộ lắng nghe phản hồi kết hợp MutationObserver
     function awaitModalResponse(speed) {
         return new Promise((resolve) => {
-            const timeoutMs = Math.max(900, Math.round(4500 / speed));
+            const timeoutMs = Math.max(800, Math.round(3500 / speed));
             let resolved = false;
 
             const timer = setTimeout(() => {
@@ -448,14 +426,14 @@
             }, timeoutMs);
 
             function checkExisting() {
-                const popups = Array.from(document.querySelectorAll('.van-dialog, .van-toast, .modal, .dialog, .popup, div[role="dialog"], [class*="notice"], [class*="alert"]'))
+                const popups = Array.from(document.querySelectorAll('.van-dialog, .van-toast, .van-popup, .modal, .dialog, .popup, div[role="dialog"], [class*="modal"], [class*="dialog"], [class*="popup"], [class*="toast"], [class*="notice"], [class*="alert"]'))
                     .filter(el => !dashboard.contains(el) && el.getBoundingClientRect().width > 0 && window.getComputedStyle(el).display !== 'none');
 
                 for (const p of popups) {
                     const txt = (p.innerText || p.textContent || "").trim();
                     if (txt.length > 2) {
-                        const closeBtn = Array.from(p.querySelectorAll('button, div[role="button"], span'))
-                            .find(b => /ok|xác nhận|confirm|đóng|close/i.test((b.innerText || '').toLowerCase()));
+                        const closeBtn = Array.from(p.querySelectorAll('button, div[role="button"], span, a'))
+                            .find(b => /ok|xác nhận|confirm|đóng|close|biết rồi/i.test((b.innerText || b.textContent || '').toLowerCase()));
                         if (closeBtn) closeBtn.click();
 
                         const firstLine = txt.split('\n').filter(t => t.trim().length > 0)[0];
@@ -481,7 +459,6 @@
                 observer.disconnect();
             }
 
-            // Kiểm tra ngay trường hợp popup đã có sẵn
             const immediate = checkExisting();
             if (immediate && !resolved) {
                 resolved = true;
@@ -491,15 +468,11 @@
         });
     }
 
-    /* ==========================================================================
-       6. QUEUE SCHEDULER & CONTROLLER
-       ========================================================================== */
     async function startEngine() {
         const rawText = document.getElementById('df-code-input').value;
-        const speed = parseFloat(document.getElementById('df-speed-opt').value) || 1.0;
+        const speed = parseFloat(document.getElementById('df-speed-opt').value) || 2.0;
         State.speedMultiplier = speed;
 
-        // Lọc trùng và chuẩn hóa danh sách
         const lines = rawText.split('\n')
             .map(c => c.trim())
             .filter(c => c.length >= 4);
@@ -507,13 +480,13 @@
         const uniqueCodes = [...new Set(lines)];
 
         if (uniqueCodes.length === 0) {
-            log('⚠️ Danh sách mã trống hoặc không hợp lệ!', 'warn');
+            log('Danh sách mã trống hoặc không hợp lệ!', 'warn');
             return;
         }
 
         const inputEl = locateInputTarget();
         if (!inputEl) {
-            log('❌ Không tìm thấy ô nhập code! Hãy đăng nhập trước.', 'danger');
+            log('Không tìm thấy ô nhập code! Hãy đăng nhập trước.', 'danger');
             return;
         }
 
@@ -523,20 +496,19 @@
         State.status = 'RUNNING';
         updateStatsUI();
 
-        // Cập nhật trạng thái nút bấm
         document.getElementById('btn-start').style.display = 'none';
         document.getElementById('btn-pause').style.display = 'block';
         document.getElementById('btn-stop').style.display = 'block';
-        log(`🚀 Khởi chạy engine v3.1: ${uniqueCodes.length} mã (Tốc độ x${speed})`, 'info');
+        log(`Khởi chạy v1.1: ${uniqueCodes.length} mã (Tốc độ x${speed})`, 'info');
 
-        const inputDelay = Math.max(70, Math.round(550 / speed));
-        const postDelay = Math.max(200, Math.round(1600 / speed));
+        const inputDelay = Math.max(80, Math.round(350 / speed));
+        const postDelay = Math.max(250, Math.round(1100 / speed));
 
         while (State.currentIndex < State.queue.length) {
             if (State.status === 'STOPPED') break;
 
             if (State.status === 'PAUSED') {
-                await sleep(400);
+                await sleep(300);
                 continue;
             }
 
@@ -561,16 +533,13 @@
                 } else if (res.type === 'used') {
                     State.stats.used++;
                     log(`⚡ [${currentCode}]: ${res.text}`, 'warn');
-                } else if (res.type === 'invalid') {
+                } else {
                     State.stats.invalid++;
                     log(`✖ [${currentCode}]: ${res.text}`, 'danger');
-                } else {
-                    State.stats.failed++;
-                    log(`⚠ [${currentCode}]: ${res.text}`, 'danger');
                 }
             } else {
                 State.stats.failed++;
-                log(`✖ [${currentCode}]: Nút xác nhận bị khóa`, 'danger');
+                log(`✖ [${currentCode}]: Không thấy nút Đổi`, 'danger');
             }
 
             State.currentIndex++;
@@ -579,7 +548,7 @@
             await sleep(postDelay);
         }
 
-        log(`🏁 Tiến trình kết thúc! Thành công: ${State.stats.success} | Đã dùng: ${State.stats.used} | Hỏng: ${State.stats.invalid}`, 'success');
+        log(`Kết thúc! Thành công: ${State.stats.success} | Đã dùng: ${State.stats.used} | Lỗi: ${State.stats.invalid + State.stats.failed}`, 'success');
         resetControls();
     }
 
@@ -597,17 +566,17 @@
         if (State.status === 'RUNNING') {
             State.status = 'PAUSED';
             document.getElementById('btn-pause').innerText = 'Tiếp tục';
-            log('⏸ Đã tạm dừng tiến trình', 'warn');
+            log('Đã tạm dừng tiến trình', 'warn');
         } else if (State.status === 'PAUSED') {
             State.status = 'RUNNING';
             document.getElementById('btn-pause').innerText = 'Tạm dừng';
-            log('▶ Tiếp tục tiến trình', 'info');
+            log('Tiếp tục tiến trình', 'info');
         }
     });
 
     document.getElementById('btn-stop').addEventListener('click', () => {
         State.status = 'STOPPED';
-        log('⏹ Đã hủy tiến trình', 'danger');
+        log('Đã hủy tiến trình', 'danger');
         resetControls();
     });
 
