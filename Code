@@ -2,26 +2,16 @@
 // @name         Delta Force Garena Auto Redeem
 // @namespace    https://staybrowser.com/
 // @version      1.4
-// @description  Hệ thống tự động redeem code Delta Force Garena v1.4 - Cơ chế khóa phiên bản bắt buộc qua GitHub
+// @description  Hệ thống tự động redeem code Delta Force Garena v1.4 - Đã loại bỏ cơ chế khóa phiên bản
 // @author       BumBOBI
 // @match        *://redeem.df.garena.sg/*
 // @grant        GM_addStyle
 // @run-at       document-start
-// @updateURL    https://raw.githubusercontent.com/BumBOBI/Auto-DF/refs/heads/main/Code
-// @downloadURL  https://raw.githubusercontent.com/BumBOBI/Auto-DF/refs/heads/main/Code
 // ==/UserScript==
 
 (function() {
     'use strict';
 
-    const SCRIPT_CONFIG = {
-        version: '1.4',
-        versionCheckUrl: 'https://raw.githubusercontent.com/BumBOBI/Auto-DF/refs/heads/main/Code',
-        repoUrl: 'https://github.com/BumBOBI/Auto-DF'
-    };
-
-    let isVersionVerified = false;
-    let remoteVersionFound = '';
     let lastApiResponse = null;
     let authData = {
         isLoggedIn: false,
@@ -30,6 +20,7 @@
         openid: ''
     };
 
+    // Theo dõi fetch để lấy thông tin đăng nhập và kết quả redeem
     const globalContext = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
     const originalFetch = globalContext.fetch;
 
@@ -163,8 +154,8 @@
             gap: 6px;
         }
         .df-badge-ver {
-            background: rgba(255,87,34,0.15);
-            color: var(--df-primary);
+            background: rgba(0, 230, 118, 0.15);
+            color: var(--df-success);
             font-size: 10px;
             padding: 2px 6px;
             border-radius: 4px;
@@ -177,57 +168,6 @@
             display: flex;
             flex-direction: column;
             gap: 10px;
-        }
-
-        /* Lớp phủ chặn khi phiên bản không trùng khớp */
-        #df-lock-overlay {
-            position: absolute;
-            top: 0;
-            left: 0;
-            right: 0;
-            bottom: 0;
-            background: rgba(11, 13, 19, 0.96);
-            backdrop-filter: blur(4px);
-            z-index: 1000;
-            display: none;
-            flex-direction: column;
-            align-items: center;
-            justify-content: center;
-            text-align: center;
-            padding: 20px;
-            box-sizing: border-box;
-            gap: 12px;
-        }
-        .df-lock-title {
-            color: var(--df-danger);
-            font-size: 15px;
-            font-weight: 900;
-            text-transform: uppercase;
-            display: flex;
-            align-items: center;
-            gap: 6px;
-        }
-        .df-lock-desc {
-            color: #d1d5db;
-            font-size: 12px;
-            line-height: 1.5;
-        }
-        .df-lock-desc strong {
-            color: var(--df-warn);
-        }
-        .df-btn-reinstall {
-            background: linear-gradient(135deg, var(--df-primary), #d84315);
-            color: #fff;
-            border: none;
-            padding: 10px 16px;
-            border-radius: 8px;
-            font-weight: 800;
-            font-size: 12px;
-            cursor: pointer;
-            box-shadow: 0 4px 15px rgba(255,87,34,0.4);
-            text-decoration: none;
-            display: inline-block;
-            margin-top: 4px;
         }
 
         .df-auth-banner {
@@ -404,24 +344,13 @@
             <div class="df-header">
                 <div class="df-title">
                     <span>🎮 Delta Force Redeem</span>
-                    <span class="df-badge-ver" id="df-ver-tag">v${SCRIPT_CONFIG.version}</span>
+                    <span class="df-badge-ver" id="df-ver-tag">v1.4 Offline</span>
                 </div>
                 <div style="display:flex; align-items:center; gap:8px;">
-                    <span id="df-btn-check-update" style="cursor:pointer; font-size:11px; color:var(--df-info); text-decoration:none;" title="Xác thực phiên bản GitHub">🔍 Kiểm tra</span>
                     <span style="cursor:pointer; font-size:16px; color:#888;" id="df-btn-close">✕</span>
                 </div>
             </div>
             <div class="df-body">
-                <!-- Lớp phủ khóa cưỡng chế nếu không trùng phiên bản -->
-                <div id="df-lock-overlay">
-                    <div class="df-lock-title">⛔ ĐÃ BỊ KHÓA SỬ DỤNG</div>
-                    <div class="df-lock-desc" id="df-lock-msg">
-                        Phiên bản bạn đang dùng không khớp với phiên bản máy chủ.<br>
-                        Vui lòng <strong>XÓA SCRIPT CŨ</strong> và <strong>TẢI LẠI</strong> để tiếp tục!
-                    </div>
-                    <button class="df-btn-reinstall" id="btn-reinstall-link">📥 Tải lại bản mới từ GitHub</button>
-                </div>
-
                 <div class="df-auth-banner" id="df-auth-box">
                     <span id="df-auth-text">🔴 Đang kiểm tra đăng nhập...</span>
                     <span id="df-auth-sub" style="font-size:10px; opacity:0.8;"></span>
@@ -453,12 +382,12 @@
                 <div class="df-setting-row">
                     <span>Tốc độ thực thi:</span>
                     <select id="df-speed-opt" class="df-select">
-                        <option value="0.75">x0.75</option>
-                        <option value="1.0">x1.0</option>
-                        <option value="1.5">x1.5</option>
-                        <option value="2.0" selected>x2.0</option>
-                        <option value="3.0">x3.0</option>
-                        <option value="4.0">x4.0</option>
+                        <option value="0.75">x0.75 (Chậm)</option>
+                        <option value="1.0">x1.0 (Chuẩn)</option>
+                        <option value="1.5">x1.5 (Vừa)</option>
+                        <option value="2.0" selected>x2.0 (Nhanh)</option>
+                        <option value="3.0">x3.0 (Siêu tốc)</option>
+                        <option value="4.0">x4.0 (Cực hạn)</option>
                     </select>
                 </div>
 
@@ -480,14 +409,9 @@
         trigger.addEventListener('click', () => {
             dashboard.style.display = (dashboard.style.display === 'flex' ? 'none' : 'flex');
             checkLoginState();
-            if (!isVersionVerified) enforceVersionCheck(true);
         });
         document.getElementById('df-btn-close').addEventListener('click', () => {
             dashboard.style.display = 'none';
-        });
-
-        document.getElementById('btn-reinstall-link').addEventListener('click', () => {
-            window.open(SCRIPT_CONFIG.versionCheckUrl, '_blank');
         });
 
         document.getElementById('btn-start').addEventListener('click', startEngine);
@@ -508,95 +432,13 @@
             resetControls();
         });
 
-        const updateBtn = document.getElementById('df-btn-check-update');
-        if (updateBtn) {
-            updateBtn.addEventListener('click', () => enforceVersionCheck(true));
-        }
-
         setInterval(checkLoginState, 2000);
-        // Tự động kiểm tra phiên bản ngay sau khi khởi động
-        setTimeout(() => enforceVersionCheck(false), 1500);
     }
 
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', initUI);
     } else {
         initUI();
-    }
-
-    function parseRemoteVersion(text) {
-        if (!text) return null;
-        // Bắt theo cú pháp UserScript: @version x.x
-        const headerMatch = text.match(/@version\s+([0-9.]+)/i);
-        if (headerMatch && headerMatch[1]) return headerMatch[1].trim();
-
-        // Bắt nếu file chỉ ghi trực tiếp phiên bản như "1.4" hoặc "v1.4"
-        const rawMatch = text.trim().match(/^v?([0-9.]+)/i);
-        if (rawMatch && rawMatch[1]) return rawMatch[1].trim();
-
-        return null;
-    }
-
-    async function enforceVersionCheck(isManual = false) {
-        const lockOverlay = document.getElementById('df-lock-overlay');
-        const lockMsg = document.getElementById('df-lock-msg');
-        const verTag = document.getElementById('df-ver-tag');
-
-        try {
-            if (isManual) log('🔍 Đang đối soát phiên bản với GitHub...', 'info');
-
-            const res = await fetch(`${SCRIPT_CONFIG.versionCheckUrl}?t=${Date.now()}`, {
-                cache: 'no-store',
-                headers: { 'Cache-Control': 'no-cache' }
-            });
-
-            if (!res.ok) throw new Error(`HTTP ${res.status}`);
-
-            const text = await res.text();
-            const remoteVer = parseRemoteVersion(text);
-
-            if (!remoteVer) {
-                throw new Error('Không đọc được phiên bản từ GitHub');
-            }
-
-            remoteVersionFound = remoteVer;
-
-            // KIỂM TRA ĐIỀU KIỆN: Bắt buộc cùng phiên bản mới cho dùng
-            if (remoteVer === SCRIPT_CONFIG.version) {
-                isVersionVerified = true;
-                if (lockOverlay) lockOverlay.style.display = 'none';
-                if (verTag) {
-                    verTag.innerText = `v${SCRIPT_CONFIG.version} (Hợp lệ)`;
-                    verTag.style.background = 'rgba(0, 230, 118, 0.2)';
-                    verTag.style.color = 'var(--df-success)';
-                }
-                if (isManual) log(`✔ Phiên bản hợp lệ (v${SCRIPT_CONFIG.version}). Được phép sử dụng!`, 'success');
-            } else {
-                // Khác phiên bản => KHÓA TOÀN BỘ CÔNG CỤ
-                isVersionVerified = false;
-                if (lockOverlay) {
-                    lockOverlay.style.display = 'flex';
-                    if (lockMsg) {
-                        lockMsg.innerHTML = `
-                            Phiên bản hiện tại: <strong>v${SCRIPT_CONFIG.version}</strong><br>
-                            Phiên bản máy chủ yêu cầu: <strong>v${remoteVer}</strong><br><br>
-                            ⚠️ Bản này không còn trùng khớp.<br>
-                            Bạn bắt buộc phải <strong>XÓA SCRIPT CŨ</strong> và <strong>TẢI LẠI</strong> bản mới!
-                        `;
-                    }
-                }
-                if (verTag) {
-                    verTag.innerText = `LỆCH v${remoteVer}`;
-                    verTag.style.background = 'rgba(255, 82, 82, 0.2)';
-                    verTag.style.color = 'var(--df-danger)';
-                }
-                log(`⛔ Phiên bản không khớp (Hiện tại: v${SCRIPT_CONFIG.version} ≠ Máy chủ: v${remoteVer}). Đã khóa công cụ!`, 'danger');
-            }
-        } catch (err) {
-            if (isManual) {
-                log(`✖ Không thể kiểm tra phiên bản: ${err.message}`, 'warn');
-            }
-        }
     }
 
     function checkLoginState() {
@@ -685,6 +527,7 @@
             elProgress.style.width = `${progressPercent}%`;
         }
 
+        // Force DOM redraw cho Safari/iOS
         if (elSuccess) void elSuccess.offsetHeight;
         if (elFailed) void elFailed.offsetHeight;
     }
@@ -735,9 +578,11 @@
         if (code === 0) {
             return { type: 'success', text: msg || 'Đổi thành công' };
         }
+        // Bao gồm mã lỗi 400067, 400065, 400066 là đã nhận
         if (code === 400067 || code === 400065 || code === 400066 || /limit|reached|đã nhận|đã đổi|already/i.test(msg)) {
             return { type: 'used', text: msg || 'Đã đạt giới hạn nhóm code (Đã nhận)' };
         }
+        // Lỗi mất token 400006, 400001, 400003
         if (code === 400001 || code === 400003 || code === 400006 || /token|login|đăng nhập/i.test(msg)) {
             authData.isLoggedIn = false;
             updateAuthUI();
@@ -841,15 +686,6 @@
     }
 
     async function startEngine() {
-        // KIỂM TRA KHÓA PHIÊN BẢN CƯỠNG CHẾ
-        if (!isVersionVerified) {
-            log('⛔ Công cụ đang bị khóa do phiên bản không khớp với GitHub!', 'danger');
-            log('👉 Hãy XÓA script cũ trong trình duyệt và tải lại bản mới.', 'warn');
-            const lockOverlay = document.getElementById('df-lock-overlay');
-            if (lockOverlay) lockOverlay.style.display = 'flex';
-            return;
-        }
-
         const isLogged = checkLoginState();
         if (!isLogged) {
             log('❌ Bạn chưa đăng nhập tài khoản Delta Force!', 'danger');
@@ -861,6 +697,7 @@
         const speed = parseFloat(document.getElementById('df-speed-opt').value) || 2.0;
         State.speedMultiplier = speed;
 
+        // Tách code linh hoạt: xuống dòng, dấu phẩy, khoảng trắng
         const tokens = rawText.split(/[\s,]+/)
             .map(c => c.trim())
             .filter(c => c.length >= 4);
@@ -887,7 +724,7 @@
         document.getElementById('btn-start').style.display = 'none';
         document.getElementById('btn-pause').style.display = 'block';
         document.getElementById('btn-stop').style.display = 'block';
-        log(`Khởi chạy v1.4: ${uniqueCodes.length} mã (Tốc độ x${speed})`, 'info');
+        log(`Khởi chạy v1.4 Offline: ${uniqueCodes.length} mã (Tốc độ x${speed})`, 'info');
 
         const inputDelay = Math.max(60, Math.round(250 / speed));
         const postDelay = Math.max(200, Math.round(800 / speed));
@@ -941,7 +778,9 @@
             await sleep(postDelay);
         }
 
-        log(`Kết thúc! Thành công: ${State.stats.success} | Đã dùng: ${State.stats.used} | Thất bại: ${State.stats.invalid + State.stats.failed}`, 'success');
+        if (State.status !== 'STOPPED') {
+            log(`Kết thúc! Thành công: ${State.stats.success} | Đã dùng: ${State.stats.used} | Thất bại: ${State.stats.invalid + State.stats.failed}`, 'success');
+        }
         resetControls();
     }
 
