@@ -1,132 +1,159 @@
 // ==UserScript==
-// @name         Delta Force Garena Auto Redeem v1.3
+// @name         Delta Force Garena Auto Redeem v1.4
 // @namespace    https://staybrowser.com/
-// @version      1.3
-// @description  Tự động nhập code Delta Force Garena v1.3. Tích hợp kiểm tra đăng nhập, chọn tốc độ, phân loại kết quả và loại bỏ code trùng.
+// @version      1.4
+// @description  Tự động đổi hàng loạt code Delta Force. Phát hiện ký tự giả, delay từng code, lịch sử 30 job, import/export CSV, tự tạm dừng khi lỗi mạng.
 // @author       BumBOBI
 // @match        *://redeem.df.garena.sg/*
 // @grant        GM_addStyle
 // @run-at       document-idle
 // ==/UserScript==
 
-(function() {
+(function () {
     'use strict';
+
+    const VERSION = '1.4';
+    const STORAGE_KEY = 'df-redeem-v14';
+    const MAX_HISTORY = 30;
+    const MAX_LOGS = 400;
+    const MIN_CODE_LEN = 6;
+    const MAX_CODE_LEN = 40;
+    const MAX_ATTEMPTS = 3;
+    const MAX_NETWORK_STREAK = 5;
+    const MAX_UNKNOWN_STREAK = 3;
+    const DELAY = { min: 0.5, max: 10, default: 3 };
+
+    const LOOKALIKES = Object.freeze({
+        А: 'A', В: 'B', Е: 'E', К: 'K', М: 'M', Н: 'H', О: 'O', Р: 'P', С: 'C', Т: 'T', Х: 'X', У: 'Y',
+        І: 'I', Ј: 'J', Ѕ: 'S', а: 'a', е: 'e', о: 'o', р: 'p', с: 'c', у: 'y', х: 'x', і: 'i', ј: 'j',
+        ѕ: 's', в: 'B', к: 'K', м: 'M', н: 'H', т: 'T',
+        Α: 'A', Β: 'B', Ε: 'E', Ζ: 'Z', Η: 'H', Ι: 'I', Κ: 'K', Μ: 'M', Ν: 'N', Ο: 'O', Ρ: 'P', Τ: 'T',
+        Υ: 'Y', Χ: 'X', ο: 'o', ν: 'v', ι: 'i',
+    });
+
+    const RESULT_BY_CODE = Object.freeze({
+        0: { kind: 'success', text: 'Đổi thành công! Quà gửi vào hộp thư in-game.' },
+        400072: { kind: 'used', text: 'Tài khoản đã đổi code này rồi.' },
+        400067: { kind: 'used', text: 'Đã đạt giới hạn đổi của nhóm code này.' },
+        400053: { kind: 'used', text: 'Không thể đổi thêm code của gói quà này.' },
+        400065: { kind: 'used', text: 'Code đã được nhận trước đó.' },
+        400066: { kind: 'used', text: 'Đã đạt giới hạn đổi.' },
+        400068: { kind: 'invalid', text: 'Code đã hết lượt đổi.' },
+        400054: { kind: 'invalid', text: 'Code không hợp lệ.' },
+        400069: { kind: 'invalid', text: 'Code chưa đến thời gian đổi.' },
+        400070: { kind: 'invalid', text: 'Code đã hết hạn.' },
+        400073: { kind: 'error', text: 'Gói quà lỗi cấu hình (phía Garena).' },
+        503001: { kind: 'error', text: 'Tài khoản chưa đủ điều kiện nhận quà này.' },
+        503701: { kind: 'network', text: 'Máy chủ Garena báo lỗi mạng.' },
+        300001: { kind: 'session', text: 'Phiên đăng nhập đã hết hạn.' },
+        400006: { kind: 'session', text: 'Mất phiên đăng nhập.' },
+    });
 
     let isRunning = false;
     let isPaused = false;
     let authData = { isLoggedIn: false };
+    let lastResults = [];
+    let lastSuspicious = [];
+
+    const loadState = () => {
+        try {
+            return JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}') || {};
+        } catch {
+            return {};
+        }
+    };
+    const saveState = (patch) => {
+        const cur = loadState();
+        localStorage.setItem(STORAGE_KEY, JSON.stringify({ ...cur, ...patch }));
+    };
 
     const css = `
+        :root, #df-redeem-panel {
+            --df-bg: #111319;
+            --df-bg2: #181b24;
+            --df-bg3: #0d0e14;
+            --df-bd: #262a38;
+            --df-tx: #e6e8ee;
+            --df-muted: #8b92a5;
+            --df-ok: #00e676;
+            --df-warn: #ffab00;
+            --df-err: #ff5252;
+            --df-info: #40c4ff;
+            --df-accent: #ff5722;
+        }
+        #df-redeem-panel.light {
+            --df-bg: #f4f5f8;
+            --df-bg2: #ffffff;
+            --df-bg3: #eef0f5;
+            --df-bd: #d5d9e4;
+            --df-tx: #1b1f2a;
+            --df-muted: #5b6273;
+        }
         #df-redeem-btn {
-            position: fixed;
-            bottom: 25px;
-            right: 15px;
-            z-index: 999999;
+            position: fixed; bottom: 25px; right: 15px; z-index: 999999;
             background: linear-gradient(135deg, #ff5722, #d84315);
-            color: #fff;
-            padding: 12px 16px;
-            border-radius: 50px;
+            color: #fff; padding: 12px 16px; border-radius: 50px;
             font-family: -apple-system, BlinkMacSystemFont, sans-serif;
-            font-size: 14px;
-            font-weight: bold;
+            font-size: 14px; font-weight: bold;
             box-shadow: 0 4px 15px rgba(255,87,34,0.4);
-            border: 1px solid rgba(255,255,255,0.2);
-            cursor: pointer;
+            border: 1px solid rgba(255,255,255,0.2); cursor: pointer;
         }
         #df-redeem-panel {
-            position: fixed;
-            bottom: 80px;
-            right: 15px;
-            width: 330px;
-            max-width: 92vw;
-            background: #111319;
-            border: 1px solid #262a38;
-            border-radius: 12px;
-            box-shadow: 0 10px 40px rgba(0,0,0,0.8);
-            padding: 14px;
-            z-index: 999999;
-            display: none;
-            font-family: -apple-system, BlinkMacSystemFont, sans-serif;
-            color: #e6e8ee;
+            position: fixed; bottom: 80px; right: 15px; width: 360px; max-width: 94vw;
+            background: var(--df-bg); border: 1px solid var(--df-bd); border-radius: 12px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.55); padding: 14px; z-index: 999999;
+            display: none; font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+            color: var(--df-tx);
         }
-        .df-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 10px;
-        }
-        .df-title { font-weight: 800; font-size: 14px; color: #fff; }
+        .df-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+        .df-title { font-weight: 800; font-size: 14px; }
         .df-badge { background: rgba(0,230,118,0.15); color: #00e676; padding: 2px 6px; border-radius: 4px; font-size: 10px; }
-        
+        .df-tools { display: flex; gap: 4px; }
+        .icon-btn {
+            background: var(--df-bg2); border: 1px solid var(--df-bd); color: var(--df-muted);
+            border-radius: 6px; padding: 3px 7px; cursor: pointer; font-size: 11px;
+        }
+        .df-tabs { display: flex; gap: 4px; margin-bottom: 8px; }
+        .df-tab {
+            flex: 1; background: var(--df-bg2); border: 1px solid var(--df-bd); color: var(--df-muted);
+            border-radius: 6px; padding: 5px 0; cursor: pointer; font-size: 11px; font-weight: 700;
+        }
+        .df-tab.active { color: var(--df-tx); border-color: var(--df-accent); }
+        .df-pane { display: none; }
+        .df-pane.active { display: block; }
         .df-auth-banner {
-            padding: 6px 10px;
-            border-radius: 6px;
-            font-size: 11px;
-            font-weight: bold;
-            text-align: center;
-            margin-bottom: 8px;
-            background: #1c1316;
-            border: 1px solid rgba(255, 82, 82, 0.3);
-            color: #ff5252;
-            transition: all 0.3s;
+            padding: 6px 10px; border-radius: 6px; font-size: 11px; font-weight: bold;
+            text-align: center; margin-bottom: 8px; background: #1c1316;
+            border: 1px solid rgba(255,82,82,0.3); color: #ff5252;
         }
         .df-auth-banner.logged {
-            background: #102619;
-            border-color: rgba(0, 230, 118, 0.3);
-            color: #00e676;
+            background: #102619; border-color: rgba(0,230,118,0.3); color: #00e676;
         }
-
-        #df-counter-box {
-            display: grid;
-            grid-template-columns: repeat(4, 1fr);
-            gap: 6px;
-            margin-bottom: 8px;
-            text-align: center;
-        }
-        .counter-badge {
-            background: #181b24;
-            padding: 6px 2px;
-            border-radius: 6px;
-            border: 1px solid #262a38;
-        }
+        #df-counter-box { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; margin-bottom: 8px; text-align: center; }
+        .counter-badge { background: var(--df-bg2); padding: 6px 2px; border-radius: 6px; border: 1px solid var(--df-bd); }
         .counter-val { font-size: 14px; font-weight: bold; }
-        .counter-title { font-size: 9px; color: #8b92a5; text-transform: uppercase; margin-top:2px; }
-        
-        .speed-control {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            margin-bottom: 8px;
-            font-size: 12px;
-            background: #181b24;
-            padding: 6px 10px;
-            border-radius: 6px;
-            border: 1px solid #262a38;
-            color: #8b92a5;
+        .counter-title { font-size: 9px; color: var(--df-muted); text-transform: uppercase; margin-top: 2px; }
+        .speed-control, .delay-control {
+            display: flex; align-items: center; justify-content: space-between; gap: 8px;
+            margin-bottom: 8px; font-size: 12px; background: var(--df-bg2); padding: 6px 10px;
+            border-radius: 6px; border: 1px solid var(--df-bd); color: var(--df-muted);
         }
-        .speed-control select {
-            background: #0f1118;
-            color: #ffab00;
-            border: 1px solid #363b50;
-            border-radius: 4px;
-            padding: 4px 8px;
-            font-weight: bold;
-            font-size: 12px;
-            outline: none;
-        }
+        .delay-control input[type="range"] { flex: 1; }
+        #df-delay-label { color: var(--df-warn); font-weight: 800; min-width: 42px; text-align: right; }
         #df-code-input {
-            width: 100%;
-            height: 70px;
-            box-sizing: border-box;
-            background: #0d0e14;
-            color: #fff;
-            border: 1px solid #262a38;
-            border-radius: 6px;
-            padding: 8px;
-            font-size: 12px;
-            resize: none;
-            margin-bottom: 8px;
-            font-family: monospace;
+            width: 100%; height: 78px; box-sizing: border-box; background: var(--df-bg3);
+            color: var(--df-tx); border: 1px solid var(--df-bd); border-radius: 6px;
+            padding: 8px; font-size: 12px; resize: vertical; margin-bottom: 6px; font-family: monospace;
+        }
+        #df-parse-hint { font-size: 11px; color: var(--df-muted); margin-bottom: 6px; min-height: 16px; }
+        #df-suspicious {
+            display: none; background: #2a1d0c; border: 1px solid rgba(255,171,0,0.35);
+            color: #ffd54f; border-radius: 6px; padding: 6px 8px; font-size: 11px; margin-bottom: 6px;
+        }
+        .btn-row { display: flex; gap: 6px; margin-bottom: 6px; flex-wrap: wrap; }
+        .mini-btn {
+            background: var(--df-bg2); border: 1px solid var(--df-bd); color: var(--df-muted);
+            border-radius: 6px; padding: 6px 8px; cursor: pointer; font-size: 11px; font-weight: 700;
         }
         .btn-group { display: flex; gap: 6px; }
         .action-btn, .pause-btn, .stop-btn {
@@ -135,29 +162,32 @@
         .action-btn { flex: 2; background: #ff5722; color: #fff; }
         .pause-btn { flex: 1; background: #373b4d; color: #ffab00; display: none; }
         .stop-btn { flex: 1; background: #3e1b21; color: #ff5252; border: 1px solid rgba(255,82,82,0.3); display: none; }
-        
+        #df-eta { font-size: 11px; color: var(--df-muted); margin: 6px 0 0; }
         #df-redeem-logs {
-            font-size: 11px;
-            margin-top: 8px;
-            height: 90px;
-            overflow-y: auto;
-            border: 1px solid #262a38;
-            border-radius: 6px;
-            padding: 6px;
-            background: #0b0c10;
-            font-family: monospace;
+            font-size: 11px; margin-top: 8px; height: 100px; overflow-y: auto;
+            border: 1px solid var(--df-bd); border-radius: 6px; padding: 6px;
+            background: var(--df-bg3); font-family: monospace;
         }
         .log-item { margin-bottom: 4px; line-height: 1.3; }
-        .log-time { color: #525970; margin-right: 4px;}
+        .log-time { color: #525970; margin-right: 4px; }
         .log-success { color: #00e676; }
         .log-used { color: #ffab00; }
-        .log-error { color: #ff5252; }
+        .log-invalid { color: #ff8a65; }
+        .log-error, .log-network, .log-session { color: #ff5252; }
         .log-info { color: #40c4ff; }
+        #df-history-list { max-height: 280px; overflow-y: auto; font-size: 11px; }
+        .hist-item {
+            background: var(--df-bg2); border: 1px solid var(--df-bd); border-radius: 8px;
+            padding: 8px; margin-bottom: 6px;
+        }
+        .hist-item b { display: block; margin-bottom: 4px; }
+        .hidden-file { display: none; }
+        #df-help { font-size: 11px; line-height: 1.45; color: var(--df-muted); }
+        #df-help code { color: var(--df-warn); }
     `;
 
-    if (typeof GM_addStyle !== "undefined") {
-        GM_addStyle(css);
-    } else {
+    if (typeof GM_addStyle !== 'undefined') GM_addStyle(css);
+    else {
         const style = document.createElement('style');
         style.textContent = css;
         document.head.appendChild(style);
@@ -165,66 +195,119 @@
 
     const triggerBtn = document.createElement('button');
     triggerBtn.id = 'df-redeem-btn';
-    triggerBtn.innerHTML = '⚡ DF TOOL 1.3';
+    triggerBtn.textContent = '⚡ DF TOOL 1.4';
 
     const panel = document.createElement('div');
     panel.id = 'df-redeem-panel';
     panel.innerHTML = `
         <div class="df-header">
             <div class="df-title">🎮 Delta Force Redeem</div>
-            <div class="df-badge">v1.3</div>
-        </div>
-        <div id="df-auth-status" class="df-auth-banner">🔴 Đang kiểm tra đăng nhập...</div>
-        <div id="df-counter-box">
-            <div class="counter-badge">
-                <div class="counter-val" id="cnt-total" style="color: #40c4ff;">0</div>
-                <div class="counter-title">Tổng mã</div>
-            </div>
-            <div class="counter-badge">
-                <div class="counter-val" id="cnt-success" style="color: #00e676;">0</div>
-                <div class="counter-title">Thành công</div>
-            </div>
-            <div class="counter-badge">
-                <div class="counter-val" id="cnt-used" style="color: #ffab00;">0</div>
-                <div class="counter-title">Đã nhận</div>
-            </div>
-            <div class="counter-badge">
-                <div class="counter-val" id="cnt-failed" style="color: #ff5252;">0</div>
-                <div class="counter-title">Thất bại</div>
+            <div class="df-tools">
+                <button class="icon-btn" id="df-theme-btn" title="Đổi giao diện">🌓</button>
+                <div class="df-badge">v${VERSION}</div>
             </div>
         </div>
-        <div class="speed-control">
-            <span>Tốc độ chạy:</span>
-            <select id="df-speed-select">
-                <option value="0.75">x0.75 (Chậm)</option>
-                <option value="1" selected>x1.0 (Chuẩn)</option>
-                <option value="1.5">x1.5 (Vừa)</option>
-                <option value="2">x2.0 (Nhanh)</option>
-                <option value="3">x3.0 (Siêu tốc)</option>
-                <option value="4">x4.0 (Cực hạn)</option>
-            </select>
+        <div class="df-tabs">
+            <button class="df-tab active" data-tab="run">Chạy</button>
+            <button class="df-tab" data-tab="history">Lịch sử</button>
+            <button class="df-tab" data-tab="help">Hướng dẫn</button>
         </div>
-        <textarea id="df-code-input" placeholder="Dán danh sách mã code vào đây (xuống dòng hoặc dấu cách)..."></textarea>
-        <div class="btn-group">
-            <button class="action-btn" id="df-start-btn">Bắt đầu chạy</button>
-            <button class="pause-btn" id="df-pause-btn">Tạm dừng</button>
-            <button class="stop-btn" id="df-stop-btn">Dừng hẳn</button>
+        <div class="df-pane active" id="pane-run">
+            <div id="df-auth-status" class="df-auth-banner">🔴 Đang kiểm tra đăng nhập...</div>
+            <div id="df-counter-box">
+                <div class="counter-badge"><div class="counter-val" id="cnt-total" style="color:#40c4ff;">0</div><div class="counter-title">Tổng mã</div></div>
+                <div class="counter-badge"><div class="counter-val" id="cnt-success" style="color:#00e676;">0</div><div class="counter-title">Thành công</div></div>
+                <div class="counter-badge"><div class="counter-val" id="cnt-used" style="color:#ffab00;">0</div><div class="counter-title">Đã nhận</div></div>
+                <div class="counter-badge"><div class="counter-val" id="cnt-failed" style="color:#ff5252;">0</div><div class="counter-title">Thất bại</div></div>
+            </div>
+            <div class="delay-control">
+                <span>Delay mặc định</span>
+                <input id="df-delay-range" type="range" min="0.5" max="10" step="0.5" value="3">
+                <span id="df-delay-label">3.0s</span>
+            </div>
+            <textarea id="df-code-input" placeholder="Dán code. Phân cách bằng xuống dòng / dấu phẩy / emoji. Delay riêng: CODE=3.5"></textarea>
+            <div id="df-parse-hint"></div>
+            <div id="df-suspicious"></div>
+            <div class="btn-row">
+                <button class="mini-btn" id="df-import-btn">📂 Import</button>
+                <button class="mini-btn" id="df-export-btn">📤 CSV</button>
+                <button class="mini-btn" id="df-retry-btn">↻ Thử lại lỗi</button>
+                <button class="mini-btn" id="df-clear-btn">Xóa ô</button>
+                <input class="hidden-file" id="df-file" type="file" accept=".txt,.csv,text/plain,text/csv">
+            </div>
+            <div class="btn-group">
+                <button class="action-btn" id="df-start-btn">Bắt đầu chạy</button>
+                <button class="pause-btn" id="df-pause-btn">Tạm dừng</button>
+                <button class="stop-btn" id="df-stop-btn">Dừng hẳn</button>
+            </div>
+            <div id="df-eta"></div>
+            <div id="df-redeem-logs"><div class="log-item"><span class="log-info">Sẵn sàng. Ctrl+Enter để chạy.</span></div></div>
         </div>
-        <div id="df-redeem-logs">
-            <div class="log-item"><span class="log-info">Sẵn sàng hoạt động!</span></div>
+        <div class="df-pane" id="pane-history">
+            <div class="btn-row">
+                <button class="mini-btn" id="df-hist-export">📤 Xuất job gần nhất</button>
+                <button class="mini-btn" id="df-hist-clear">Xóa lịch sử</button>
+            </div>
+            <div id="df-history-list"></div>
+        </div>
+        <div class="df-pane" id="pane-help">
+            <div id="df-help">
+                <b>Định dạng code</b><br>
+                Mọi ký tự không phải chữ/số/_/- đều là dấu phân cách.<br><br>
+                <b>Delay riêng</b><br>
+                <code>DFREWARD=5</code> → chờ 5 giây sau code đó.<br>
+                Khoảng hợp lệ 0.5–60 giây. Không ghi thì dùng slider.<br><br>
+                <b>Ký tự giả</b><br>
+                Chữ Nga/Hy Lạp giống Latin sẽ được phát hiện và gợi ý sửa trước khi gửi.<br><br>
+                <b>Tự tạm dừng</b><br>
+                5 lỗi mạng liên tiếp, hoặc hết phiên đăng nhập.
+            </div>
         </div>
     `;
 
     document.body.appendChild(triggerBtn);
     document.body.appendChild(panel);
 
+    const $ = (id) => document.getElementById(id);
+    const saved = loadState();
+    if (saved.theme === 'light') panel.classList.add('light');
+    if (saved.delay) {
+        const r = $('df-delay-range');
+        r.value = String(saved.delay);
+        $('df-delay-label').textContent = Number(saved.delay).toFixed(1) + 's';
+    }
+
     triggerBtn.addEventListener('click', () => {
         panel.style.display = (panel.style.display === 'none' || panel.style.display === '') ? 'block' : 'none';
-        checkLoginStatus(); 
+        checkLoginStatus();
+        renderHistory();
+        previewParse();
+    });
+
+    panel.querySelectorAll('.df-tab').forEach((tab) => {
+        tab.addEventListener('click', () => {
+            panel.querySelectorAll('.df-tab').forEach((t) => t.classList.remove('active'));
+            panel.querySelectorAll('.df-pane').forEach((p) => p.classList.remove('active'));
+            tab.classList.add('active');
+            $('pane-' + tab.dataset.tab).classList.add('active');
+            if (tab.dataset.tab === 'history') renderHistory();
+        });
+    });
+
+    $('df-theme-btn').addEventListener('click', () => {
+        panel.classList.toggle('light');
+        saveState({ theme: panel.classList.contains('light') ? 'light' : 'dark' });
+    });
+
+    $('df-delay-range').addEventListener('input', () => {
+        const v = Number($('df-delay-range').value);
+        $('df-delay-label').textContent = v.toFixed(1) + 's';
+        saveState({ delay: v });
+        previewParse();
     });
 
     const addLog = (text, type = 'info') => {
-        const logBox = document.getElementById('df-redeem-logs');
+        const logBox = $('df-redeem-logs');
         if (!logBox) return;
         const div = document.createElement('div');
         div.className = `log-item log-${type}`;
@@ -232,17 +315,17 @@
         const timeStr = `${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}`;
         div.innerHTML = `<span class="log-time">[${timeStr}]</span>${text}`;
         logBox.appendChild(div);
+        while (logBox.children.length > MAX_LOGS) logBox.removeChild(logBox.firstChild);
         logBox.scrollTop = logBox.scrollHeight;
     };
 
-    const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
     const setInputValue = (input, val) => {
         input.focus();
-        const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")?.set;
+        const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
         if (nativeSetter) nativeSetter.call(input, val);
         else input.value = val;
-        
         input.dispatchEvent(new Event('input', { bubbles: true }));
         input.dispatchEvent(new Event('change', { bubbles: true }));
         input.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true }));
@@ -250,34 +333,30 @@
 
     function getCDKInput() {
         const inputs = Array.from(document.querySelectorAll('input[type="text"], input:not([type])'))
-            .filter(el => !panel.contains(el) && el.offsetParent !== null);
-
-        let cdkInput = inputs.find(el => {
+            .filter((el) => !panel.contains(el) && el.offsetParent !== null);
+        const cdkInput = inputs.find((el) => {
             const attr = (el.placeholder + ' ' + el.id + ' ' + el.name + ' ' + el.className).toLowerCase();
             return attr.includes('cdk') || attr.includes('code') || attr.includes('mã') || attr.includes('quà');
         });
-
         return cdkInput || (inputs.length > 0 ? inputs[inputs.length - 1] : null);
     }
 
     function getSubmitButton() {
         const buttons = Array.from(document.querySelectorAll('button, div[role="button"], a, [class*="btn"]'))
-            .filter(b => !panel.contains(b) && b.offsetParent !== null);
-
-        return buttons.find(b => {
+            .filter((b) => !panel.contains(b) && b.offsetParent !== null);
+        return buttons.find((b) => {
             const txt = (b.innerText || b.textContent || '').trim().toLowerCase();
-            return ['đổi', 'xác nhận', 'nhận', 'redeem', 'exchange', 'confirm'].some(kw => txt.includes(kw));
+            return ['đổi', 'xác nhận', 'nhận', 'redeem', 'exchange', 'confirm'].some((kw) => txt.includes(kw));
         });
     }
 
     function checkLoginStatus() {
-        const authBanner = document.getElementById('df-auth-status');
+        const authBanner = $('df-auth-status');
         const inputField = getCDKInput();
-        
         if (inputField) {
             authData.isLoggedIn = true;
             authBanner.className = 'df-auth-banner logged';
-            authBanner.innerText = '🟢 Đã đăng nhập & Chọn nhân vật thành công';
+            authBanner.innerText = '🟢 Đã đăng nhập & thấy ô nhập code';
         } else {
             authData.isLoggedIn = false;
             authBanner.className = 'df-auth-banner';
@@ -285,68 +364,187 @@
         }
         return authData.isLoggedIn;
     }
-    
     setInterval(checkLoginStatus, 2000);
 
-    function parseMessage(text) {
-        const lower = text.toLowerCase();
-        
-        if (/thành công|chúc mừng|success|congratulations/i.test(lower)) {
-            return { status: 'success', msg: text };
-        }
-        if (/đã sử dụng|đã nhận|đã đổi|already|limit|reached|giới hạn|400067|400065|400066/i.test(lower)) {
-            return { status: 'used', msg: text };
-        }
-        if (/đăng nhập|login|hết hạn|token|400006/i.test(lower)) {
-            return { status: 'expired', msg: 'Mất phiên đăng nhập! Hãy tải lại trang.' };
-        }
-        return { status: 'error', msg: text };
+    function looksLikeCode(token) {
+        return token.length >= MIN_CODE_LEN && token.length <= MAX_CODE_LEN && /[A-Za-z]/.test(token);
     }
 
-    const inspectResponse = async (speedMultiplier) => {
-        const timeout = Math.max(900, Math.round(4500 / speedMultiplier));
-        const checkInterval = Math.max(50, Math.round(250 / speedMultiplier));
-        const startTime = Date.now();
+    function fixLookalikes(token) {
+        const upperOnly = !/[a-z]/.test(token);
+        let out = '';
+        for (const ch of token) {
+            if (/[A-Za-z0-9_-]/.test(ch)) out += ch;
+            else if (LOOKALIKES[ch]) out += upperOnly ? LOOKALIKES[ch].toUpperCase() : LOOKALIKES[ch];
+            else return null;
+        }
+        return out;
+    }
 
+    function parseCodes(text) {
+        const codes = [];
+        const ignored = [];
+        const suspicious = [];
+        const seen = new Set();
+        let duplicates = 0;
+        const rawText = String(text ?? '').normalize('NFKC');
+        for (const raw of rawText.split(/[^\p{L}\p{N}_=.\-]+/u)) {
+            if (!raw) continue;
+            let token = raw;
+            let delaySec = null;
+            const eqIdx = raw.indexOf('=');
+            if (eqIdx > 0) {
+                const left = raw.slice(0, eqIdx).replace(/[-_]+$/g, '');
+                const right = raw.slice(eqIdx + 1);
+                if (/^\d+(\.\d+)?$/.test(right)) {
+                    const n = Number(right);
+                    if (n >= 0.5 && n <= 60) delaySec = n;
+                    token = left;
+                }
+            }
+            token = token.replace(/^[-_]+|[-_]+$/g, '');
+            if (!token) continue;
+            if (/^[A-Za-z0-9_-]+$/.test(token)) {
+                if (!looksLikeCode(token)) ignored.push(token);
+                else if (seen.has(token)) duplicates += 1;
+                else {
+                    seen.add(token);
+                    codes.push({ code: token, delaySec });
+                }
+                continue;
+            }
+            const suggestion = fixLookalikes(token);
+            if (suggestion && /[A-Za-z0-9]/.test(token) && looksLikeCode(suggestion)) {
+                suspicious.push({ token, suggestion, delaySec });
+            } else ignored.push(token);
+        }
+        return { codes, duplicates, ignored, suspicious };
+    }
+
+    function previewParse() {
+        const parsed = parseCodes($('df-code-input').value);
+        lastSuspicious = parsed.suspicious;
+        const defaultDelay = Number($('df-delay-range').value) || DELAY.default;
+        const etaSec = parsed.codes.reduce((sum, item, i) => {
+            const d = item.delaySec != null ? item.delaySec : defaultDelay;
+            return sum + 1.2 + (i === 0 ? 0 : d);
+        }, 0);
+        const bits = [];
+        bits.push(`${parsed.codes.length} code hợp lệ`);
+        if (parsed.duplicates) bits.push(`${parsed.duplicates} trùng`);
+        if (parsed.ignored.length) bits.push(`${parsed.ignored.length} bỏ qua`);
+        if (parsed.codes.length) bits.push(`~${Math.ceil(etaSec)}s`);
+        $('df-parse-hint').textContent = bits.join(' · ');
+        const box = $('df-suspicious');
+        if (parsed.suspicious.length) {
+            box.style.display = 'block';
+            box.innerHTML = parsed.suspicious.slice(0, 8).map((s) =>
+                `⚠ <b>${escapeHtml(s.token)}</b> → <b>${escapeHtml(s.suggestion)}</b>`
+            ).join('<br>') +
+                (parsed.suspicious.length > 8 ? `<br>… +${parsed.suspicious.length - 8}` : '') +
+                `<br><button class="mini-btn" id="df-fix-all" style="margin-top:6px">Áp dụng tất cả gợi ý</button>`;
+            const fix = $('df-fix-all');
+            if (fix) fix.onclick = applySuspiciousFixes;
+        } else {
+            box.style.display = 'none';
+            box.innerHTML = '';
+        }
+        $('df-eta').textContent = parsed.codes.length
+            ? `Ước tính ~${formatDuration(etaSec * 1000)} với delay ${defaultDelay.toFixed(1)}s`
+            : '';
+    }
+
+    function applySuspiciousFixes() {
+        let text = $('df-code-input').value;
+        for (const s of lastSuspicious) {
+            text = text.split(s.token).join(s.suggestion);
+        }
+        $('df-code-input').value = text;
+        previewParse();
+        addLog(`Đã sửa ${lastSuspicious.length} code ký tự giả.`, 'info');
+    }
+
+    function escapeHtml(s) {
+        return String(s).replace(/[&<>"']/g, (c) => ({
+            '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+        }[c]));
+    }
+
+    function formatDuration(ms) {
+        const s = Math.max(0, Math.round(ms / 1000));
+        if (s < 60) return `${s}s`;
+        const m = Math.floor(s / 60);
+        const r = s % 60;
+        return `${m}p${r ? r + 's' : ''}`;
+    }
+
+    $('df-code-input').addEventListener('input', previewParse);
+
+    function parseMessage(text) {
+        const raw = String(text || '').trim();
+        const hint = /error_hint_(\d+)/i.exec(raw);
+        if (hint && RESULT_BY_CODE[hint[1]]) {
+            const known = RESULT_BY_CODE[Number(hint[1])];
+            return { status: known.kind, msg: known.text, code: Number(hint[1]) };
+        }
+        const num = /\b(4000\d{2}|503\d{3}|300001|0)\b/.exec(raw);
+        if (num && RESULT_BY_CODE[num[1]]) {
+            const known = RESULT_BY_CODE[Number(num[1])];
+            return { status: known.kind, msg: known.text, code: Number(num[1]) };
+        }
+        const lower = raw.toLowerCase();
+        if (/thành công|chúc mừng|success|congratulations/i.test(lower)) {
+            return { status: 'success', msg: RESULT_BY_CODE[0].text };
+        }
+        if (/đã sử dụng|đã nhận|đã đổi|already|limit|reached|giới hạn/i.test(lower)) {
+            return { status: 'used', msg: raw };
+        }
+        if (/không hợp lệ|invalid|hết hạn|expired|hết lượt/i.test(lower)) {
+            return { status: 'invalid', msg: raw };
+        }
+        if (/đăng nhập|login|hết hạn phiên|token/i.test(lower)) {
+            return { status: 'session', msg: 'Mất phiên đăng nhập! Hãy tải lại trang.' };
+        }
+        if (/mạng|network|timeout|kết nối/i.test(lower)) {
+            return { status: 'network', msg: raw };
+        }
+        return { status: 'error', msg: raw || 'Không đọc được phản hồi' };
+    }
+
+    const inspectResponse = async (timeoutMs) => {
+        const timeout = Math.max(2500, timeoutMs || 8000);
+        const checkInterval = 120;
+        const startTime = Date.now();
         while (Date.now() - startTime < timeout) {
-            const popups = Array.from(document.querySelectorAll('.van-dialog, .van-toast, .modal, .dialog, .popup, div[role="dialog"], [class*="notice"], [class*="alert"]'))
-                .filter(el => !panel.contains(el) && el.getBoundingClientRect().width > 0 && window.getComputedStyle(el).display !== 'none');
+            const popups = Array.from(document.querySelectorAll(
+                '.van-dialog, .van-toast, .modal, .dialog, .popup, div[role="dialog"], [class*="notice"], [class*="alert"], #diaTips, #superTips'
+            )).filter((el) => !panel.contains(el) && el.getBoundingClientRect().width > 0 && window.getComputedStyle(el).display !== 'none');
 
             for (const pop of popups) {
-                const text = (pop.innerText || pop.textContent || "").trim();
+                const text = (pop.innerText || pop.textContent || '').trim();
                 if (text.length > 2) {
                     const closeBtn = Array.from(pop.querySelectorAll('button, div[role="button"], span'))
-                        .find(b => /ok|xác nhận|confirm|đóng|close|biết rồi/i.test((b.innerText || '').toLowerCase()));
+                        .find((b) => /ok|xác nhận|confirm|đóng|close|biết rồi/i.test((b.innerText || '').toLowerCase()));
                     if (closeBtn) closeBtn.click();
-
-                    const cleanMsg = text.split('\n').filter(t => t.trim().length > 0)[0];
+                    const cleanMsg = text.split('\n').filter((t) => t.trim().length > 0)[0];
                     return parseMessage(cleanMsg);
                 }
             }
             await sleep(checkInterval);
         }
-        return { status: 'error', msg: 'Hết thời gian chờ / Lỗi mạng' };
+        return { status: 'network', msg: 'Hết thời gian chờ / lỗi mạng' };
     };
 
     function updateCounterView(total, success, used, failed) {
-        const elTotal = document.getElementById('cnt-total');
-        const elSuccess = document.getElementById('cnt-success');
-        const elUsed = document.getElementById('cnt-used');
-        const elFailed = document.getElementById('cnt-failed');
-
-        elTotal.textContent = String(total);
-        elSuccess.textContent = String(success);
-        elUsed.textContent = String(used);
-        elFailed.textContent = String(failed);
-
-        void elSuccess.offsetHeight; 
-        void elFailed.offsetHeight;
+        $('cnt-total').textContent = String(total);
+        $('cnt-success').textContent = String(success);
+        $('cnt-used').textContent = String(used);
+        $('cnt-failed').textContent = String(failed);
     }
 
-    const startBtn = document.getElementById('df-start-btn');
-    const pauseBtn = document.getElementById('df-pause-btn');
-    const stopBtn = document.getElementById('df-stop-btn');
-    const speedSelect = document.getElementById('df-speed-select');
+    const startBtn = $('df-start-btn');
+    const pauseBtn = $('df-pause-btn');
+    const stopBtn = $('df-stop-btn');
 
     pauseBtn.addEventListener('click', () => {
         isPaused = !isPaused;
@@ -366,6 +564,124 @@
         }
     });
 
+    function csvEscape(v) {
+        const s = String(v ?? '');
+        if (/[",\n]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+        return s;
+    }
+
+    function downloadCsv(filename, rows) {
+        const header = ['code', 'status', 'message', 'delaySec'];
+        const body = rows.map((r) => [r.code, r.status, r.msg || r.message || '', r.delaySec ?? ''].map(csvEscape).join(','));
+        const blob = new Blob(['\uFEFF' + header.join(',') + '\n' + body.join('\n')], { type: 'text/csv;charset=utf-8' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = filename;
+        a.click();
+        URL.revokeObjectURL(a.href);
+    }
+
+    function pushHistory(job) {
+        const state = loadState();
+        const history = Array.isArray(state.history) ? state.history : [];
+        history.unshift(job);
+        saveState({ history: history.slice(0, MAX_HISTORY) });
+    }
+
+    function renderHistory() {
+        const history = loadState().history || [];
+        const box = $('df-history-list');
+        if (!history.length) {
+            box.innerHTML = '<div class="hist-item">Chưa có job nào.</div>';
+            return;
+        }
+        box.innerHTML = history.map((h, idx) => {
+            const t = new Date(h.at).toLocaleString('vi-VN');
+            return `<div class="hist-item">
+                <b>${t}</b>
+                Tổng ${h.total} · OK ${h.success} · Đã nhận ${h.used} · Lỗi ${h.failed}
+                <div class="btn-row" style="margin:6px 0 0">
+                    <button class="mini-btn" data-load="${idx}">Nạp code lỗi</button>
+                    <button class="mini-btn" data-csv="${idx}">CSV</button>
+                </div>
+            </div>`;
+        }).join('');
+        box.querySelectorAll('[data-load]').forEach((btn) => {
+            btn.onclick = () => {
+                const job = history[Number(btn.dataset.load)];
+                const failed = (job.results || []).filter((r) => !['success', 'used'].includes(r.status));
+                $('df-code-input').value = failed.map((r) => r.code).join('\n');
+                panel.querySelector('[data-tab="run"]').click();
+                previewParse();
+                addLog(`Đã nạp ${failed.length} code lỗi từ lịch sử.`, 'info');
+            };
+        });
+        box.querySelectorAll('[data-csv]').forEach((btn) => {
+            btn.onclick = () => {
+                const job = history[Number(btn.dataset.csv)];
+                downloadCsv(`df-redeem-${job.at}.csv`, job.results || []);
+            };
+        });
+    }
+
+    $('df-import-btn').addEventListener('click', () => $('df-file').click());
+    $('df-file').addEventListener('change', async (e) => {
+        const file = e.target.files && e.target.files[0];
+        e.target.value = '';
+        if (!file) return;
+        const text = await file.text();
+        const cur = $('df-code-input').value.trim();
+        $('df-code-input').value = cur ? cur + '\n' + text : text;
+        previewParse();
+        addLog(`Đã import ${file.name}`, 'info');
+    });
+
+    $('df-export-btn').addEventListener('click', () => {
+        if (!lastResults.length) {
+            addLog('Chưa có kết quả để xuất.', 'error');
+            return;
+        }
+        downloadCsv(`df-redeem-${Date.now()}.csv`, lastResults);
+        addLog('Đã tải file CSV.', 'success');
+    });
+
+    $('df-retry-btn').addEventListener('click', () => {
+        const failed = lastResults.filter((r) => !['success', 'used'].includes(r.status));
+        if (!failed.length) {
+            addLog('Không có code lỗi để thử lại.', 'used');
+            return;
+        }
+        $('df-code-input').value = failed.map((r) => r.code).join('\n');
+        previewParse();
+        addLog(`Đã nạp lại ${failed.length} code lỗi.`, 'info');
+    });
+
+    $('df-clear-btn').addEventListener('click', () => {
+        $('df-code-input').value = '';
+        previewParse();
+    });
+
+    $('df-hist-export').addEventListener('click', () => {
+        const history = loadState().history || [];
+        if (!history.length || !history[0].results) {
+            addLog('Chưa có job để xuất.', 'error');
+            return;
+        }
+        downloadCsv(`df-redeem-${history[0].at}.csv`, history[0].results);
+    });
+
+    $('df-hist-clear').addEventListener('click', () => {
+        saveState({ history: [] });
+        renderHistory();
+    });
+
+    document.addEventListener('keydown', (e) => {
+        if ((e.ctrlKey || e.metaKey) && e.key === 'Enter' && panel.style.display === 'block' && !isRunning) {
+            e.preventDefault();
+            runBatch();
+        }
+    });
+
     async function runBatch() {
         checkLoginStatus();
         if (!authData.isLoggedIn) {
@@ -373,22 +689,23 @@
             return;
         }
 
-        const textarea = document.getElementById('df-code-input');
-        
-        const rawTokens = textarea.value.split(/[\s,]+/).map(c => c.trim()).filter(c => c.length >= 4);
-        const list = [...new Set(rawTokens)]; 
-
-        if (list.length === 0) {
-            addLog('⚠️ Vui lòng dán code hợp lệ vào ô!', 'error');
+        const parsed = parseCodes($('df-code-input').value);
+        if (parsed.suspicious.length) {
+            addLog(`⚠ Có ${parsed.suspicious.length} code ký tự giả. Bấm "Áp dụng tất cả gợi ý" hoặc sửa tay trước khi chạy.`, 'used');
             return;
         }
+        const list = parsed.codes;
+        if (!list.length) {
+            addLog('⚠️ Không có code hợp lệ (tối thiểu 6 ký tự, có chữ).', 'error');
+            return;
+        }
+        if (parsed.duplicates) addLog(`Đã loại ${parsed.duplicates} code trùng.`, 'info');
+        if (parsed.ignored.length) addLog(`Đã bỏ qua ${parsed.ignored.length} chuỗi không phải code.`, 'info');
 
-        const speed = parseFloat(speedSelect.value) || 1;
-        const inputDelay = Math.max(70, Math.round(650 / speed));
-        const pauseDelay = Math.max(200, Math.round(1800 / speed));
-
+        const defaultDelay = Number($('df-delay-range').value) || DELAY.default;
         let successCount = 0, usedCount = 0, failCount = 0;
         updateCounterView(list.length, 0, 0, 0);
+        lastResults = [];
 
         isRunning = true;
         isPaused = false;
@@ -396,73 +713,126 @@
         pauseBtn.style.display = 'block';
         pauseBtn.innerText = 'Tạm dừng';
         stopBtn.style.display = 'block';
-        speedSelect.disabled = true;
+        $('df-delay-range').disabled = true;
 
-        addLog(`🚀 Bắt đầu chạy ${list.length} mã (Tốc độ x${speed})...`, 'info');
+        addLog(`🚀 Bắt đầu ${list.length} mã · delay mặc định ${defaultDelay.toFixed(1)}s`, 'info');
+
+        let networkStreak = 0;
+        let unknownStreak = 0;
 
         for (let i = 0; i < list.length; i++) {
             if (!isRunning) {
                 addLog(`⏹️ Đã hủy tại mã thứ ${i}/${list.length}`, 'error');
                 break;
             }
-
-            while (isPaused && isRunning) {
-                await sleep(500); 
-            }
+            while (isPaused && isRunning) await sleep(250);
             if (!isRunning) break;
 
-            const code = list[i];
-            addLog(`[${i + 1}/${list.length}] Đang gửi: ${code}...`, 'info');
+            const item = list[i];
+            const code = item.code;
+            const waitSec = item.delaySec != null ? item.delaySec : defaultDelay;
+            addLog(`[${i + 1}/${list.length}] Gửi: ${code}`, 'info');
 
-            const currentInput = getCDKInput();
-            if (currentInput) {
+            let outcome = null;
+            for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+                const currentInput = getCDKInput();
+                if (!currentInput) {
+                    outcome = { status: 'session', msg: 'Không tìm thấy ô nhập mã.' };
+                    break;
+                }
                 setInputValue(currentInput, code);
-            } else {
-                addLog('❌ Không tìm thấy ô nhập mã! Mất kết nối.', 'error');
+                await sleep(Math.max(80, Math.round(waitSec * 80)));
+
+                const submitBtn = getSubmitButton();
+                if (!submitBtn) {
+                    outcome = { status: 'error', msg: 'Không tìm thấy nút Đổi.' };
+                    break;
+                }
+                submitBtn.click();
+                outcome = await inspectResponse(Math.max(4000, waitSec * 1500));
+
+                if (outcome.status === 'network' && attempt < MAX_ATTEMPTS && isRunning) {
+                    addLog(`↻ ${code}: lỗi mạng, thử lại ${attempt + 1}/${MAX_ATTEMPTS}`, 'network');
+                    await sleep(waitSec * 2000);
+                    continue;
+                }
                 break;
             }
 
-            await sleep(inputDelay);
+            const row = { code, status: outcome.status, msg: outcome.msg, delaySec: item.delaySec ?? defaultDelay };
+            lastResults.push(row);
 
-            const submitBtn = getSubmitButton();
-            if (submitBtn) {
-                submitBtn.click();
-                const res = await inspectResponse(speed);
-                
-                if (res.status === 'success') {
-                    successCount++;
-                    addLog(`✔ ${code}: ${res.msg}`, 'success');
-                } else if (res.status === 'used') {
-                    usedCount++;
-                    addLog(`⚡ ${code}: ${res.msg}`, 'used');
-                } else if (res.status === 'expired') {
-                    addLog(`🛑 Bị văng đăng nhập! Dừng tool an toàn.`, 'error');
-                    isRunning = false;
-                    break;
-                } else {
-                    failCount++;
-                    addLog(`✖ ${code}: ${res.msg}`, 'error');
+            if (outcome.status === 'success') {
+                successCount++;
+                networkStreak = 0;
+                unknownStreak = 0;
+                addLog(`✔ ${code}: ${outcome.msg}`, 'success');
+            } else if (outcome.status === 'used') {
+                usedCount++;
+                networkStreak = 0;
+                unknownStreak = 0;
+                addLog(`⚡ ${code}: ${outcome.msg}`, 'used');
+            } else if (outcome.status === 'invalid') {
+                failCount++;
+                networkStreak = 0;
+                unknownStreak = 0;
+                addLog(`✖ ${code}: ${outcome.msg}`, 'invalid');
+            } else if (outcome.status === 'session') {
+                failCount++;
+                addLog(`🛑 ${outcome.msg} Dừng an toàn.`, 'session');
+                isRunning = false;
+                break;
+            } else if (outcome.status === 'network') {
+                failCount++;
+                networkStreak++;
+                addLog(`✖ ${code}: ${outcome.msg}`, 'network');
+                if (networkStreak >= MAX_NETWORK_STREAK) {
+                    addLog(`⏸️ ${MAX_NETWORK_STREAK} lỗi mạng liên tiếp — tạm dừng.`, 'error');
+                    isPaused = true;
+                    pauseBtn.innerText = 'Tiếp tục';
+                    networkStreak = 0;
                 }
             } else {
                 failCount++;
-                addLog(`✖ ${code}: Không tìm thấy nút Đổi!`, 'error');
+                unknownStreak++;
+                addLog(`✖ ${code}: ${outcome.msg}`, 'error');
+                if (unknownStreak >= MAX_UNKNOWN_STREAK) {
+                    addLog(`⏸️ ${MAX_UNKNOWN_STREAK} kết quả lạ liên tiếp — tạm dừng (có thể bị giới hạn).`, 'error');
+                    isPaused = true;
+                    pauseBtn.innerText = 'Tiếp tục';
+                    unknownStreak = 0;
+                }
             }
 
             updateCounterView(list.length, successCount, usedCount, failCount);
-            await sleep(pauseDelay);
+            const remain = list.length - i - 1;
+            $('df-eta').textContent = remain > 0
+                ? `Còn ${remain} mã · ~${formatDuration(remain * ((item.delaySec ?? defaultDelay) * 1000 + 1200))}`
+                : 'Hoàn tất danh sách.';
+
+            if (i < list.length - 1 && isRunning) await sleep(Math.round(waitSec * 1000));
         }
 
-        if (isRunning) {
-            addLog(`🏁 Kết thúc! Thành công: ${successCount} | Đã dùng: ${usedCount} | Lỗi: ${failCount}`, 'success');
-        }
+        pushHistory({
+            at: Date.now(),
+            total: list.length,
+            success: successCount,
+            used: usedCount,
+            failed: failCount,
+            results: lastResults,
+        });
+
+        if (isRunning) addLog(`🏁 Xong! Thành công ${successCount} · Đã nhận ${usedCount} · Lỗi ${failCount}`, 'success');
 
         isRunning = false;
         startBtn.style.display = 'block';
-        startBtn.innerText = 'Chạy Lại';
+        startBtn.innerText = 'Chạy lại';
         pauseBtn.style.display = 'none';
         stopBtn.style.display = 'none';
-        speedSelect.disabled = false;
+        $('df-delay-range').disabled = false;
+        renderHistory();
     }
 
     startBtn.addEventListener('click', runBatch);
+    previewParse();
 })();
